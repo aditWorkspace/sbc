@@ -7,3 +7,4 @@ node_modules/
 .superpowers/
 .DS_Store
 tsconfig.tsbuildinfo
+.vercel

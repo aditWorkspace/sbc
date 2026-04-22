@@ -138,6 +138,32 @@ pnpm test:e2e      # Playwright
 pnpm run typecheck
 ```
 
+## Enrichment cron trigger (Vercel Hobby workaround)
+
+Vercel Hobby only allows **daily** cron schedules. The enrichment worker should run every minute. Two options:
+
+**Option A (recommended — free):** Use an external cron service to ping the endpoint every minute:
+
+1. Sign up at **https://cron-job.org** (free, no credit card)
+2. Create a new cron job:
+   - URL: `https://<your-vercel-domain>/api/cron/enrich`
+   - Schedule: every 1 minute
+   - HTTP method: GET
+   - Headers: `Authorization: Bearer <CRON_SECRET>` (copy from `.env.local`)
+3. Save — it'll start hitting your endpoint every minute
+
+**Option B:** Upgrade Vercel to Pro ($20/user/mo), which unlocks minute-level crons. Then restore the cron in `vercel.json`:
+```json
+{ "path": "/api/cron/enrich", "schedule": "* * * * *" }
+```
+
+Until one of these is set up, enrichment jobs sit queued until manually triggered:
+```bash
+curl -H "Authorization: Bearer $CRON_SECRET" https://<your-vercel-domain>/api/cron/enrich
+```
+
+The cleanup cron (daily 09:00 UTC = 02:00 PT in PDT) stays on Vercel Cron — daily is fine under Hobby.
+
 ## Known limits
 
 - Vercel Hobby function timeout: 60s. Enrichment worker processes 10 jobs/tick — if Apollo slows, cron may time out; the next tick picks up unfinished work.
