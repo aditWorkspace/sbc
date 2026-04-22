@@ -10,9 +10,12 @@ export function supabaseServer() {
     env().NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
     {
       cookies: {
-        get: (n) => store.get(n)?.value,
-        set: (n, v, o) => store.set({ name: n, value: v, ...o }),
-        remove: (n, o) => store.set({ name: n, value: '', ...o }),
+        getAll: () => store.getAll(),
+        setAll: (cookiesToSet) => {
+          cookiesToSet.forEach(({ name, value, options }) =>
+            store.set(name, value, options)
+          );
+        },
       },
     }
   );
