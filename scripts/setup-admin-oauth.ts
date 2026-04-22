@@ -57,6 +57,15 @@ async function main() {
       } else { res.statusCode = 400; res.end('missing code'); reject(new Error('missing code')); }
     });
     const port = new URL(env().GOOGLE_OAUTH_REDIRECT_URI).port || '3010';
+    srv.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`\n✗ Port ${port} is already in use (probably \`pnpm dev\` is running).`);
+        console.error(`  Stop the dev server (Ctrl-C) and re-run this script.\n`);
+        reject(err);
+      } else {
+        reject(err);
+      }
+    });
     srv.listen(Number(port));
   });
   const { tokens } = await client.getToken(code);
