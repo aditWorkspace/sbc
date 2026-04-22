@@ -28,24 +28,26 @@ describe('icypeasBulkMatch', () => {
     vi.useRealTimers();
   });
 
+  // Real Icypeas response shape (verified against live API 2026-04-22):
+  //   poll returns { success, items: [{ _id, status: 'FOUND', results: { firstname, lastname, emails: [{email, certainty}], company_name, domain } }] }
+  const pollItem = (overrides: Record<string, unknown>) =>
+    mockResponse({ success: true, items: [{ _id: 'abc', ...overrides }] });
+
   it('submits and polls, returns parsed person', async () => {
     const fetchMock = vi.fn()
-      // submit
       .mockResolvedValueOnce(mockResponse({ success: true, item: { _id: 'abc', status: 'NONE' } }))
-      // first poll: still NONE
-      .mockResolvedValueOnce(mockResponse({ item: { status: 'NONE' } }))
-      // second poll: DEBITED with email
-      .mockResolvedValueOnce(mockResponse({ item: {
-        status: 'DEBITED',
-        firstname: 'Elon', lastname: 'Musk',
-        emails: [{ email: 'elon@tesla.com', certainty: 'ultra_sure' }],
-        company_name: 'Tesla',
-      } }));
+      .mockResolvedValueOnce(pollItem({ status: 'IN_PROGRESS' }))
+      .mockResolvedValueOnce(pollItem({
+        status: 'FOUND',
+        results: {
+          firstname: 'Elon', lastname: 'Musk',
+          emails: [{ email: 'elon@tesla.com', certainty: 'ultra_sure' }],
+          company_name: 'Tesla',
+        },
+      }));
     vi.stubGlobal('fetch', fetchMock);
     const promise = icypeasBulkMatch([{ first_name: 'Elon', last_name: 'Musk', organization_name: 'Tesla' }]);
-    // advance past first poll interval
     await vi.advanceTimersByTimeAsync(2100);
-    // advance past second poll interval
     await vi.advanceTimersByTimeAsync(2100);
     const r = await promise;
     expect(r.matches.length).toBe(1);
@@ -59,10 +61,10 @@ describe('icypeasBulkMatch', () => {
   it('maps low-certainty to guessed', async () => {
     vi.stubGlobal('fetch', vi.fn()
       .mockResolvedValueOnce(mockResponse({ success: true, item: { _id: 'abc', status: 'NONE' } }))
-      .mockResolvedValueOnce(mockResponse({ item: {
-        status: 'DEBITED',
-        emails: [{ email: 'maybe@x.com', certainty: 'likely' }],
-      } })));
+      .mockResolvedValueOnce(pollItem({
+        status: 'FOUND',
+        results: { emails: [{ email: 'maybe@x.com', certainty: 'likely' }] },
+      })));
     const promise = icypeasBulkMatch([{ first_name: 'A', last_name: 'B', organization_name: 'C' }]);
     await vi.advanceTimersByTimeAsync(2100);
     const r = await promise;
@@ -72,7 +74,10 @@ describe('icypeasBulkMatch', () => {
   it('returns null for item with no emails', async () => {
     vi.stubGlobal('fetch', vi.fn()
       .mockResolvedValueOnce(mockResponse({ success: true, item: { _id: 'abc', status: 'NONE' } }))
-      .mockResolvedValueOnce(mockResponse({ item: { status: 'NOT_FOUND', emails: [] } })));
+      .mockResolvedValueOnce(pollItem({
+        status: 'NOT_FOUND',
+        results: { emails: [] },
+      })));
     const promise = icypeasBulkMatch([{ first_name: 'A', last_name: 'B', organization_name: 'C' }]);
     await vi.advanceTimersByTimeAsync(2100);
     const r = await promise;

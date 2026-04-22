@@ -50,7 +50,30 @@ async function submitSingle(detail: BulkMatchDetail): Promise<string | null> {
   return body?.item?._id ?? null;
 }
 
-async function readItem(id: string): Promise<{ item?: { status?: string; emails?: { email?: string; certainty?: string }[]; firstname?: string; lastname?: string; company_name?: string; domain?: string } }> {
+// Actual Icypeas response shape (verified empirically 2026-04-22):
+//   { success: true, items: [ { _id, status: 'FOUND'|'NOT_FOUND'|'FAILED'|...,
+//                               results: { firstname, lastname, emails: [{email, certainty}] } } ] }
+// The docs' `item.emails` shape was wrong; real data has `items[0].results.emails`.
+interface IcypeasResultItem {
+  _id?: string;
+  status?: string;
+  results?: {
+    firstname?: string;
+    lastname?: string;
+    fullname?: string;
+    emails?: { email?: string; certainty?: string }[];
+    company_name?: string;
+    domain?: string;
+  };
+}
+interface IcypeasReadResponse {
+  success?: boolean;
+  items?: IcypeasResultItem[];
+  // legacy/alternate shape (some endpoints return item singular)
+  item?: IcypeasResultItem;
+}
+
+async function readItem(id: string): Promise<IcypeasResultItem | null> {
   const res = await fetch(`${BASE}/bulk-single-searchs/read`, {
     method: 'POST',
     headers: {
@@ -62,19 +85,22 @@ async function readItem(id: string): Promise<{ item?: { status?: string; emails?
   if (res.status === 402) throw new IcypeasCreditsExhausted();
   if (res.status === 429) throw new IcypeasRateLimit();
   if (!res.ok) throw new IcypeasError(`Icypeas read ${res.status}: ${await res.text()}`);
-  return res.json();
+  const body = (await res.json()) as IcypeasReadResponse;
+  // Prefer `items[0]` (current API), fall back to singular `item`
+  return body.items?.[0] ?? body.item ?? null;
 }
 
-function personFromItem(item: { emails?: { email?: string; certainty?: string }[]; firstname?: string; lastname?: string; company_name?: string; domain?: string } | undefined): BulkMatchPerson | null {
+function personFromItem(item: IcypeasResultItem | null): BulkMatchPerson | null {
   if (!item) return null;
-  const primary = item.emails?.[0];
+  const r = item.results;
+  const primary = r?.emails?.[0];
   if (!primary?.email) return null;
   return {
     email: primary.email,
     email_status: certaintyToStatus(primary.certainty),
-    organization: { name: item.company_name ?? item.domain },
-    first_name: item.firstname,
-    last_name: item.lastname,
+    organization: { name: r?.company_name ?? r?.domain },
+    first_name: r?.firstname,
+    last_name: r?.lastname,
   };
 }
 
@@ -102,10 +128,10 @@ export async function icypeasBulkMatch(details: BulkMatchDetail[]): Promise<Bulk
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
     await Promise.all([...pending].map(async (i) => {
       try {
-        const body = await readItem(ids[i]!);
-        const status = body.item?.status;
+        const item = await readItem(ids[i]!);
+        const status = item?.status;
         if (status && !NON_TERMINAL_STATUSES.has(status)) {
-          results[i] = personFromItem(body.item);
+          results[i] = personFromItem(item);
           pending.delete(i);
         }
       } catch (e) {
