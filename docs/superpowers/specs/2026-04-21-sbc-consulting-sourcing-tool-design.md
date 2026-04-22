@@ -38,8 +38,8 @@ There are exactly two roles. Role is a boolean (`is_admin`) on the `consultants`
 
 **Admin**
 - Everything a consultant can do
-- Plus: whitelist/deactivate consultants, see all consultants' activity, force-refresh a company's template, manually delete pool rows, view aggregate stats
-- Designated by setting `is_admin=true` on their consultant row (seeded once during initial deploy)
+- Plus: **add / approve / deactivate / delete consultants**, **force sign-out** (revoke all active sessions for a consultant, forcing them to re-authenticate), **delete account** (fully remove them — their next sign-in creates a brand-new, unapproved consultant row), see all consultants' activity, force-refresh a company's template, manually delete pool rows, view aggregate stats
+- Designated by setting `is_admin=true` on their consultant row (seeded once during initial deploy); any number of admins is supported
 
 ---
 
@@ -49,29 +49,41 @@ There are exactly two roles. Role is a boolean (`is_admin`) on the `consultants`
 
 1. Consultant visits the app root → clicks "Sign in with Google"
 2. Google OAuth restricted to `hd=berkeley.edu` (Google-enforced hosted-domain hint)
-3. Supabase Auth callback → creates a `consultants` row with `is_approved=false`
-4. App shows a "pending admin approval" screen; no other features accessible
-5. Admin opens admin dashboard → "Pending approvals" section → clicks Approve
+3. Supabase Auth callback fires a webhook that runs the **consultant resolution** procedure:
+   - Look for the newest *non-deactivated* consultants row matching `lower(email)`
+   - If found with `auth_user_id IS NULL` (admin pre-created it via the Consultants tab) → backfill `auth_user_id`, `display_name` from the Google profile, set `last_active_at=now()`
+   - If found with the *same* `auth_user_id` → nothing to do (existing returning user)
+   - If not found (brand-new or re-signup after a delete) → create a new consultants row with `is_approved=false`, `auth_user_id=<new>`. Previously-deactivated rows with the same email stay in the table for historical FK integrity, but they don't match anymore because the partial unique index only applies to non-deactivated rows
+4. App shows a "pending admin approval" screen if `is_approved=false`; no other features accessible
+5. Admin opens admin dashboard → "Pending approvals" section → clicks Approve (sets `is_approved=true`, `approved_at`, `approved_by`)
 6. Consultant refreshes → lands on dashboard with upload area and "Get sheet" button
 
 ### 3.2 Upload flow
 
 1. Consultant drags a CSV onto the upload zone, or clicks to browse
-2. Client parses headers; must map to `first_name`, `last_name`, `company` (case-insensitive, with some aliases — "First Name"/"firstname"/"fname" all map). If required columns can't be inferred, show a column-mapping UI before submit.
-3. POST to `/api/uploads` with the parsed rows
-4. Server creates an `uploads` row with `status='processing'`
-5. Server performs **dedup in three stages**:
+2. Client parses headers. Column mapping proceeds in three tiers (cheapest first):
+   - **Tier 1 — exact/alias match:** exact-name plus a curated alias table covering common header variants (`"First Name"`, `"FirstName"`, `"first_name"`, `"fname"`, `"given_name"` → `first_name`; same for last and company)
+   - **Tier 2 — LLM-assisted mapping (see §18):** if any required column isn't matched by Tier 1, send the header row + first 3 data rows to a cheap OpenRouter model; model returns a JSON map like `{ "first_name": "A", "last_name": "B", "company": "C", "unknown": ["D", "E"] }`. Cached by header hash so repeated CSVs from the same source are free after the first
+   - **Tier 3 — manual UI:** if the LLM is unavailable or returns low confidence, show a dropdown UI asking the consultant to map each column
+3. Messy name cells also get LLM-parsed when needed: if `first_name` is empty but a `full_name` column exists (or any single column clearly contains a full name like "Dr. John Smith Jr."), the LLM extracts `{first, last}` for the upload (batched — one LLM call per upload, not per row). See §18.2.
+4. POST to `/api/uploads` with the parsed rows
+5. Server creates an `uploads` row with `status='processing'`
+6. Server performs **dedup in three stages**:
    - **Stage A — intra-file dedup:** duplicate `(normalized_first, normalized_last, normalized_company)` within the same upload → keep first occurrence
    - **Stage B — pool dedup:** rows that already exist in `contacts` → silently drop (was already uploaded by someone)
    - **Stage C — archive dedup:** rows present in `dedup_archive` → silently drop (was already pulled by the club)
-6. For each surviving row:
-   - Find-or-create a `companies` row by `name_normalized`
+7. **Row-level validation:** rows failing any of these checks are silently dropped (counted into `row_count_rejected`), consistent with the "any error → delete row" principle:
+   - `first_name` empty after parsing
+   - `company` empty after parsing
+   - Either field exceeding 200 characters (looks corrupted)
+   - `first_name` or `company` normalizes to empty string (e.g., emoji-only)
+8. Company canonicalization: for each unique company name in the upload, normalize it. If the normalized name already exists in `companies` → use it. If it's *nearly* (Levenshtein ≤ 1 OR subset-after-stopword-strip) matches an existing one (e.g., "Google LLC" vs "Google Inc." vs "Google") → call the LLM (§18.3) to confirm "same company or not"; on confirmation, attach to the existing row. Otherwise create a new company row with the display name as provided.
+9. For each surviving row:
    - If the company has `template_confidence ∈ {HIGH, MEDIUM, LOW}` → render email from template, insert contact with `enrichment_status='enriched'`, `email_source='template'`
-   - If company is `UNRESOLVED` → insert contact with `enrichment_status='pending'`, enqueue `enrichment_jobs` row with `kind='direct_finder'` for this contact
-   - If company is new or `SAMPLING` and has no pending sample job → insert contact as pending, enqueue one `kind='sample'` job (deduped by company_id)
-7. Update `uploads` row: `row_count_raw`, `row_count_deduped`, `row_count_archived`, `row_count_admitted`, `status='complete'`
-8. Return upload summary to client: "We received 300 rows. 40 already existed, 260 added. 180 enriched instantly. 80 are being enriched in the background — check back in a minute."
-9. Client subscribes to Supabase Realtime on the `contacts` table filtered by `upload_id` (or polls `/api/uploads/:id`) to show live enrichment progress.
+   - Otherwise → insert contact with `enrichment_status='pending'`, and **enqueue one `enrichment_jobs` row per company** (unique index prevents duplicates if many rows share the company)
+10. Update `uploads` row: `row_count_raw`, `row_count_deduped`, `row_count_already_in_pool`, `row_count_archived`, `row_count_rejected`, `row_count_admitted`, `status='complete'`
+11. Return upload summary to client: "We received 300 rows. 22 were duplicates in your file, 18 already in the pool, 4 already emailed previously, 6 had missing data (dropped), 250 added. 180 enriched instantly. 70 are being enriched in the background — check back in a minute."
+12. Client subscribes to Supabase Realtime on the `contacts` and `uploads` tables (filtered by `upload_id`) to show live enrichment progress: "Enriched 180 / 250 — 70 pending."
 
 ### 3.3 Pull-sheet flow
 
@@ -121,10 +133,16 @@ There are exactly two roles. Role is a boolean (`is_admin`) on the `consultants`
 2. Dashboard defaults to "Overview" tab showing KPIs, per-consultant table, template cache health, top companies
 3. Tabs: Overview, Consultants, Template Cache, Pool Admin, Settings
 4. Time-range toggle (day / week / month / all-time) affects Overview metrics
-5. Clicking a consultant row → drill-down: full upload history table + full sheet history table
-6. Template Cache tab → list of companies with confidence levels + "Force refresh" button per row (resets the company to `UNKNOWN`, drops samples, enqueues a new sampling job)
-7. Pool Admin tab → search pool by name/company, delete a row, release an archive entry
-8. Settings tab → consultant whitelist management (add email, approve pending, deactivate)
+5. Clicking a consultant row → drill-down: full upload history table + full sheet history table + action buttons
+6. Per-consultant actions on the drill-down page:
+   - **Approve** (if pending) — flips `is_approved=true`
+   - **Force sign-out** — calls `supabase.auth.admin.signOut(auth_user_id, 'global')` to revoke all active sessions. Writes `sessions_revoked_at=now()`. The consultant's next request hits a 401 and is redirected to sign in again. Approval and history are preserved.
+   - **Deactivate** — soft-delete: sets `deactivated_at=now()`, `deactivated_by=admin_id`, `is_approved=false`. Also force-signs-out. Historical uploads/sheets remain intact (FK preserved). Email can be re-added or signed in again; that triggers the re-signup path in §3.1 step 3 and creates a brand-new consultants row
+   - **Delete account** — hard-removes the Supabase Auth user: `supabase.auth.admin.deleteUser(auth_user_id)` + sets `deactivated_at=now()`, `auth_user_id=NULL` on the consultants row (the row stays for FK integrity of past uploads/sheets). Their sessions are implicitly destroyed. If they sign in again, they land in the re-signup path like a net-new user.
+   - **Promote / demote admin** — flips `is_admin`
+7. Template Cache tab → list of companies with confidence levels + "Force refresh" button per row (resets the company to `UNKNOWN`, drops samples, enqueues a new enrichment job)
+8. Pool Admin tab → search pool by name/company, delete a row, release an archive entry, bulk-delete by company
+9. Settings tab → consultant whitelist management (add email, approve pending, deactivate), system config (Apollo cost-per-credit, OpenRouter model choice, retention override)
 
 ---
 
@@ -204,8 +222,8 @@ All tables use UUID primary keys. `timestamptz` defaults to `now()`. Foreign key
 ```sql
 CREATE TABLE consultants (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  auth_user_id uuid UNIQUE REFERENCES auth.users(id) ON DELETE CASCADE,
-  email text UNIQUE NOT NULL CHECK (email LIKE '%@berkeley.edu'),
+  auth_user_id uuid UNIQUE REFERENCES auth.users(id) ON DELETE SET NULL,
+  email text NOT NULL CHECK (lower(email) LIKE '%@berkeley.edu'),
   display_name text,
   is_admin boolean NOT NULL DEFAULT false,
   is_approved boolean NOT NULL DEFAULT false,
@@ -213,9 +231,16 @@ CREATE TABLE consultants (
   approved_by uuid REFERENCES consultants(id),
   deactivated_at timestamptz,
   deactivated_by uuid REFERENCES consultants(id),
+  sessions_revoked_at timestamptz,         -- set when admin force-signs-out this consultant
   last_active_at timestamptz DEFAULT now(),
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Partial unique: only the currently-active row per email must be unique.
+-- Deactivated rows stay in the table for FK integrity of past uploads/sheets,
+-- but can collide with a new signup that uses the same address.
+CREATE UNIQUE INDEX consultants_email_active_unique
+  ON consultants (lower(email)) WHERE deactivated_at IS NULL;
 
 -- RLS: consultants can SELECT their own row; admins can do everything
 ALTER TABLE consultants ENABLE ROW LEVEL SECURITY;
@@ -333,10 +358,11 @@ CREATE TABLE uploads (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   consultant_id uuid NOT NULL REFERENCES consultants(id),
   filename text,
-  row_count_raw int NOT NULL DEFAULT 0,
+  row_count_raw int NOT NULL DEFAULT 0,            -- rows in the parsed CSV
   row_count_deduped int NOT NULL DEFAULT 0,        -- after intra-file dedup
-  row_count_archived int NOT NULL DEFAULT 0,       -- dropped by archive dedup
   row_count_already_in_pool int NOT NULL DEFAULT 0,-- dropped by pool dedup
+  row_count_archived int NOT NULL DEFAULT 0,       -- dropped by archive dedup
+  row_count_rejected int NOT NULL DEFAULT 0,       -- dropped for missing/invalid data
   row_count_admitted int NOT NULL DEFAULT 0,       -- actually inserted
   status text NOT NULL DEFAULT 'processing'
     CHECK (status IN ('processing', 'complete', 'failed')),
@@ -352,34 +378,27 @@ CREATE INDEX uploads_consultant_idx ON uploads(consultant_id, uploaded_at);
 ```sql
 CREATE TABLE enrichment_jobs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  kind text NOT NULL CHECK (kind IN ('sample', 'direct_finder')),
   company_id uuid NOT NULL REFERENCES companies(id),
-  contact_id uuid REFERENCES contacts(id),  -- only for kind='direct_finder'
   status text NOT NULL DEFAULT 'queued'
     CHECK (status IN ('queued', 'running', 'done', 'failed')),
   attempts int NOT NULL DEFAULT 0,
   locked_at timestamptz,
   last_error text,
   created_at timestamptz NOT NULL DEFAULT now(),
-  completed_at timestamptz,
-
-  -- at most one queued/running sample job per company (prevents duplicate work)
-  UNIQUE (company_id, kind) DEFERRABLE
+  completed_at timestamptz
 );
 CREATE INDEX enrichment_jobs_queue_idx ON enrichment_jobs(status, created_at)
   WHERE status IN ('queued', 'running');
+
+-- At most one queued/running job per company — prevents stampede when many
+-- contacts share a company. The worker processes one job per company per tick
+-- and re-enqueues if more rows remain pending after the batch.
+CREATE UNIQUE INDEX enrichment_jobs_per_company_unique
+  ON enrichment_jobs(company_id)
+  WHERE status IN ('queued', 'running');
 ```
 
-The unique `(company_id, kind)` constraint prevents stampede: if a company has 50 pending contacts, we still enqueue only one sample job. Once the job completes and the company is still unresolved, we enqueue the next round explicitly.
-
-For `direct_finder` jobs, uniqueness is per-contact; the constraint is relaxed — we can use a partial unique index instead:
-
-```sql
-CREATE UNIQUE INDEX enrichment_jobs_sample_unique ON enrichment_jobs(company_id)
-  WHERE kind='sample' AND status IN ('queued', 'running');
-CREATE UNIQUE INDEX enrichment_jobs_finder_unique ON enrichment_jobs(contact_id)
-  WHERE kind='direct_finder' AND status IN ('queued', 'running');
-```
+There is a single kind of enrichment job — no separate "sample" vs "direct_finder". The worker processes up to 10 pending contacts per job via one Apollo Bulk People Enrichment call; those returned emails double as pattern samples, and once a template locks, the rest of that company's pending rows fill via template without further API calls. See §6.
 
 ### 5.8 `sheets`
 
@@ -479,145 +498,205 @@ Transitions (evaluated after each batch):
 
 Winner = the pattern with the highest `matching_samples / sample_size`. Ties broken by pattern order (index 0 wins). Domains are compared as exact strings (case-insensitive) — `tesla.com` and `teslamotors.com` are different domains. If the top pattern has two domains, the more frequent domain wins; if frequencies tie, the shorter domain wins (heuristic: corporate primaries tend to be shorter than acquired/legacy ones).
 
-### 6.5 Worker loop (pseudocode)
+### 6.5 Apollo Bulk People Enrichment — single endpoint, dual use
+
+All Apollo calls go through **`POST https://api.apollo.io/api/v1/people/bulk_match`** (Apollo's Bulk People Enrichment endpoint, [docs](https://docs.apollo.io/reference/bulk-people-enrichment)). Up to 10 people per call; each returned work-email costs 1 credit.
+
+Each call does two things at once:
+
+1. **Fills emails** on the contacts we passed in (primary purpose)
+2. **Feeds the template-detection state machine** — every returned email becomes a sample for the company's pattern inference
+
+This means sampling is free as a side effect of enrichment: we never make a call just to "learn a pattern" — we learn while we're filling. The consultants' own uploaded names ARE the sample set.
+
+Request shape:
+```ts
+const body = {
+  details: pending_contacts.slice(0, 10).map(c => ({
+    first_name: c.first_name,
+    last_name: c.last_name ?? undefined,
+    organization_name: c.company_display,
+  })),
+  reveal_personal_emails: false,  // work emails only, keeps cost predictable
+};
+```
+
+Response shape (relevant fields):
+```ts
+{
+  matches: [
+    { first_name, last_name, email, email_status, organization: { name, website_url } } | null,
+    ...
+  ],
+  missing_records: number
+}
+```
+
+### 6.6 Worker loop (pseudocode)
 
 ```
 POST /api/cron/enrich (Vercel Cron, every 60s)
   assert bearer == CRON_SECRET
-  acquire advisory lock `enrichment_worker` (prevent overlap if previous run slow)
+  acquire advisory lock `enrichment_worker` (prevents overlap if previous run slow)
 
   jobs = SELECT * FROM enrichment_jobs
          WHERE status='queued'
          ORDER BY created_at
-         LIMIT 20
+         LIMIT 10
          FOR UPDATE SKIP LOCKED
 
   for job in jobs:
     UPDATE enrichment_jobs SET status='running', locked_at=now(), attempts=attempts+1 WHERE id=job.id
-
     try:
-      if job.kind == 'sample':
-        run_sampling_round(job.company_id)
-      elif job.kind == 'direct_finder':
-        run_direct_finder(job.contact_id)
-
+      process_enrichment_job(job.company_id)
       UPDATE enrichment_jobs SET status='done', completed_at=now() WHERE id=job.id
     except ApolloRateLimit:
       UPDATE enrichment_jobs SET status='queued', locked_at=null, last_error='rate_limit' WHERE id=job.id
-      sleep 5s
+      break  # stop draining this tick; next tick retries
+    except ApolloCreditExhausted:
+      UPDATE enrichment_jobs SET status='queued', locked_at=null, last_error='credits_exhausted' WHERE id=job.id
+      raise OpsAlert('apollo_credits_exhausted')  # flag admin banner
     except Exception as e:
       if job.attempts < 3:
         UPDATE enrichment_jobs SET status='queued', locked_at=null, last_error=e.message WHERE id=job.id
       else:
         UPDATE enrichment_jobs SET status='failed', last_error=e.message WHERE id=job.id
+        # Per the delete-on-error policy, also delete the pending contacts we were unable to enrich:
+        DELETE FROM contacts WHERE company_id=job.company_id AND enrichment_status='pending'
 
   release advisory lock
 ```
 
-Vercel Cron hobby tier: function execution up to 60s. Pro: 300s. Either is plenty for 20 jobs/batch; if Apollo slow, lower the batch size.
-
-### 6.6 Sampling round
+### 6.7 Processing one enrichment job (bulk_match + template inference)
 
 ```
-def run_sampling_round(company_id):
-    company = load companies WHERE id=company_id FOR UPDATE
-    remaining_samples_needed = next_target_size(company.sample_size) - company.sample_size
-    if remaining_samples_needed <= 0:
-      mark company UNRESOLVED if at cap, return
+def process_enrichment_job(company_id):
+    company = SELECT * FROM companies WHERE id=company_id FOR UPDATE
 
-    people = apollo.people_search(
-      organization_name=company.display_name,
-      per_page=remaining_samples_needed * 2,  # over-fetch; some may lack emails
-      email_status=['verified'],  # Apollo values: verified | guessed | unavailable | bounced
-                                  # we only trust 'verified' for pattern inference
-    )
-    # NOTE: cost model — 1 credit per person returned with an email, regardless of our use
+    # Fast path: template already locked → render from template, no Apollo call
+    if company.template_confidence IN ('HIGH', 'MEDIUM', 'LOW'):
+      fill_via_template(company)
+      reenqueue_if_pending(company_id)
+      return
 
-    new_samples = []
-    for p in people:
-      if len(new_samples) >= remaining_samples_needed: break
-      email = p.work_email or p.email
-      if not email:
-        record sample (ignored: no_email_found)
+    # Otherwise, bulk_match up to 10 pending rows at this company
+    pending = SELECT * FROM contacts
+              WHERE company_id=company_id AND enrichment_status='pending'
+              LIMIT 10
+              FOR UPDATE SKIP LOCKED
+    if not pending:
+      return  # nothing to do; job becomes done
+
+    try:
+      response = apollo.bulk_match(details=[
+        { first_name: p.first_name, last_name: p.last_name, organization_name: p.company_display }
+        for p in pending
+      ])
+    except (NetworkError, Apollo5xx) as e:
+      raise  # handled by worker loop (retry)
+
+    # Iterate matched entries in same order as the request
+    for contact, matched in zip(pending, response.matches):
+      if matched is None or not matched.email:
+        # No match or no email — per "any error deletes the row" policy
+        DELETE FROM contacts WHERE id=contact.id
         continue
-      domain = email.split('@')[1]
-      if domain in PERSONAL_DOMAINS:
-        record sample (ignored: personal_domain)
-        continue
-      pattern = detect_pattern(p.first_name, p.last_name, email)
-      record sample (detected_pattern=pattern, detected_domain=domain)
-      new_samples.append(...)
 
-    # Re-evaluate
-    (winner_pattern, winner_domain, match_count, total) = tally_samples(company_id)
-    company.sample_size = total
+      if matched.email_status != 'verified':
+        # Apollo guessed the email; don't trust for pattern learning,
+        # and don't use as a pool email. Delete.
+        DELETE FROM contacts WHERE id=contact.id
+        continue
+
+      domain = matched.email.split('@')[1].lower()
+      if domain IN PERSONAL_DOMAINS:
+        # Personal email — not useful; delete row.
+        # (Personal samples are recorded for audit but the contact is still deleted.)
+        INSERT INTO apollo_samples (company_id, ..., email_ignored_reason='personal_domain')
+        DELETE FROM contacts WHERE id=contact.id
+        continue
+
+      # Validate the match came from the same company (Apollo sometimes cross-matches)
+      if normalize(matched.organization.name) != company.name_normalized:
+        INSERT INTO apollo_samples (company_id, ..., email_ignored_reason='wrong_company')
+        DELETE FROM contacts WHERE id=contact.id
+        continue
+
+      # Good match — detect pattern, record sample, fill email
+      pattern = detect_pattern(contact.first_name, contact.last_name, matched.email)
+      INSERT INTO apollo_samples (company_id, first=contact.first_name, last=contact.last_name,
+                                   email=matched.email, detected_pattern=pattern, detected_domain=domain,
+                                   credits_spent=1)
+      UPDATE contacts
+        SET email=matched.email, email_source='apollo_direct',
+            enrichment_status='enriched', enriched_at=now()
+        WHERE id=contact.id
+
+    # Re-tally samples and update company state
+    (winner_pattern, winner_domain, match_count, total_samples) = tally_samples(company_id)
+    company.sample_size = total_samples
     company.matching_samples = match_count
     company.template_pattern = winner_pattern
     company.domain = winner_domain
+    company.apollo_credits_spent += count_credits_spent_this_call
     company.last_sampled_at = now()
 
-    ratio = match_count / total if total > 0 else 0
-    if total >= 3 and total == match_count:  # 3/3 exact
-      company.template_confidence = 'HIGH'
-      company.locked_at = now()
-    elif total >= 10 and ratio >= 0.9:
+    ratio = match_count / total_samples if total_samples else 0
+    if total_samples >= 3 and total_samples == match_count:
       company.template_confidence = 'HIGH'; company.locked_at = now()
-    elif total >= 10 and ratio >= 0.75:
+    elif total_samples >= 10 and ratio >= 0.9:
+      company.template_confidence = 'HIGH'; company.locked_at = now()
+    elif total_samples >= 10 and ratio >= 0.75:
       company.template_confidence = 'MEDIUM'; company.locked_at = now()
-    elif total >= 10 and ratio >= 0.6:
+    elif total_samples >= 10 and ratio >= 0.6:
       company.template_confidence = 'LOW'; company.locked_at = now()
-    elif total >= 30:
+    elif total_samples >= 30:
       company.template_confidence = 'UNRESOLVED'
+      # UNRESOLVED doesn't change processing: future jobs keep bulk_matching the
+      # remaining pending rows one batch at a time. No template is applied.
     else:
       company.template_confidence = 'SAMPLING'
 
     save company
 
-    # Drain pending contacts if we just locked a template
-    if company.template_confidence in ('HIGH', 'MEDIUM', 'LOW'):
-      UPDATE contacts
-        SET email = render_template(first_name, last_name, company.template_pattern, company.domain),
-            email_source = 'template',
-            enrichment_status = 'enriched',
-            enriched_at = now()
-        WHERE company_id = company.id AND enrichment_status = 'pending'
-    elif company.template_confidence == 'UNRESOLVED':
-      INSERT INTO enrichment_jobs (kind, company_id, contact_id)
-        SELECT 'direct_finder', company.id, id FROM contacts
-        WHERE company_id = company.id AND enrichment_status = 'pending'
-    elif company.template_confidence == 'SAMPLING':
-      # need more samples — enqueue next round
-      INSERT INTO enrichment_jobs (kind, company_id) VALUES ('sample', company.id)
+    # If we locked a template, drain all remaining pending rows via template (zero Apollo cost)
+    if company.template_confidence IN ('HIGH', 'MEDIUM', 'LOW'):
+      fill_via_template(company)
 
-def next_target_size(current):
-    if current < 3: return 3
-    if current < 10: return 10
-    if current < 20: return 20
-    return 30
+    # Re-enqueue if more rows remain pending at this company (idempotent via unique index)
+    reenqueue_if_pending(company_id)
+
+
+def fill_via_template(company):
+    UPDATE contacts
+      SET email = render_template(first_name_normalized, last_name_normalized,
+                                   company.template_pattern, company.domain),
+          email_source = 'template',
+          enrichment_status = 'enriched',
+          enriched_at = now()
+      WHERE company_id = company.id AND enrichment_status = 'pending'
+
+
+def reenqueue_if_pending(company_id):
+    IF EXISTS (SELECT 1 FROM contacts WHERE company_id=company_id AND enrichment_status='pending'):
+      INSERT INTO enrichment_jobs (company_id) VALUES (company_id)
+      ON CONFLICT DO NOTHING  -- partial unique index prevents stampede
 ```
 
-### 6.7 Direct finder (for UNRESOLVED companies)
-
-```
-def run_direct_finder(contact_id):
-    c = load contact
-    co = load company
-    result = apollo.email_finder(first_name=c.first_name, last_name=c.last_name, domain=co.domain or guessed_domain(co.name_normalized))
-    if result.email and result.email_status == 'verified':
-      UPDATE contacts SET email=result.email, email_source='apollo_direct', enrichment_status='enriched', enriched_at=now() WHERE id=contact_id
-    else:
-      UPDATE contacts SET enrichment_status='failed' WHERE id=contact_id
-```
-
-For UNRESOLVED companies without a learned domain, `guessed_domain` tries `${name_normalized}.com` as a best-effort (e.g., "tesla" → "tesla.com"). Low accuracy but free.
+Observations:
+- **Per-row errors quietly delete the row.** No retry, no crashing the batch. The user's "one email doesn't matter" principle makes this simple.
+- **No separate "sampling" vs "direct finder" code paths.** Same loop handles both.
+- **One Apollo call per 10 rows.** A 300-row CSV of new companies needs ≤ 30 bulk_match calls to fully enrich, not 300 individual ones. With typical pattern convergence at 3 samples, actual call count is much lower because locking-after-3 skips all remaining rows at that company.
+- **UNRESOLVED companies gracefully degrade:** we keep bulk_matching at them — each call fills what it fills, deletes what it can't. No fallback endpoint needed.
 
 ### 6.8 Force-refresh (admin)
 
 Admin clicks Force-refresh on a company:
 1. `UPDATE companies SET template_confidence='UNKNOWN', template_pattern=NULL, domain=NULL, sample_size=0, matching_samples=0, locked_at=NULL WHERE id=X`
-2. `DELETE FROM apollo_samples WHERE company_id=X` (optional; keep for audit by default)
-3. `INSERT INTO enrichment_jobs (kind, company_id) VALUES ('sample', X)`
-4. Already-enriched contacts for this company keep their old emails — force-refresh only affects future uploads. Admin can optionally tick "also re-enrich current contacts" which would flip them to pending.
+2. `apollo_samples` rows for this company are kept for audit (admin can tick "also purge samples" to delete them)
+3. `INSERT INTO enrichment_jobs (company_id) VALUES (X) ON CONFLICT DO NOTHING`
+4. Already-enriched contacts keep their old emails by default. Admin can tick "also re-enrich current contacts," which flips them to `enrichment_status='pending'` — at the next worker tick they'll be re-processed.
+5. Race safety: if the worker is mid-processing a sample batch for this company at the moment of force-refresh, its update uses an optimistic concurrency guard (`WHERE locked_at = :saved_locked_at`); on mismatch, the worker discards its update.
 
 ---
 
@@ -713,9 +792,12 @@ GET /api/cron/cleanup (daily 02:00 PT)
 ### 8.2 Consultants tab
 
 - List of all consultants with filters (approved / pending / deactivated / admin)
-- Add-email input → creates a `consultants` row with `is_approved=true` but `auth_user_id=NULL` — when that person signs in with Google, the row matches on email and pulls in the `auth_user_id`
-- Approve pending signups with one click
-- Deactivate: sets `deactivated_at=now()`, `deactivated_by=admin_id`. Deactivated consultants fail auth middleware check.
+- **Add-email input** → creates a `consultants` row with `is_approved=true` but `auth_user_id=NULL` — when that person signs in with Google, the row matches on email and pulls in the `auth_user_id`
+- **Approve** pending signups with one click
+- **Force sign-out** — revokes all active sessions via `supabase.auth.admin.signOut(auth_user_id, 'global')`, sets `sessions_revoked_at=now()`; consultant keeps approval and history, just must sign in again
+- **Deactivate** — soft-disables (see §3.4); row remains for FK integrity of past uploads/sheets
+- **Delete account** — hard-deletes the Supabase Auth user; next sign-in from that email creates a brand-new unapproved consultants row
+- **Promote / demote admin** — flips `is_admin` (with a confirm dialog)
 
 ### 8.3 Template Cache tab
 
@@ -737,7 +819,15 @@ All Overview tab queries accept a `range` query param: `day | week | month | all
 
 ## 9. Error handling & edge cases
 
-**CSV parse failures.** Show inline errors before submit. Common cases: headers missing, no rows, rows with missing `first_name` or `company`. Missing `last_name` is allowed (patterns like `first`/`last` may not resolve, but the row still goes in the pool and fills if possible).
+### 9.0 The guiding principle — "any row error = delete the row"
+
+We send thousands of emails per day. A single lost row is noise. Any per-row processing error anywhere in the pipeline — CSV parse, dedup, company canonicalization, Apollo call, template render, Google Sheets write — results in silently dropping the row (DELETE from `contacts` if it's already in; skip from `INSERT` if it hasn't been inserted yet). The error is logged to `apollo_samples.email_ignored_reason` or an `upload_errors` log, but the row does not reach a sheet.
+
+This simplifies the code dramatically: there is no retry-per-row, no human triage, no "failed" status that a consultant has to resolve. The only cases that halt processing are **global errors** — Apollo credit exhaustion, Google API outage, DB connection loss — which trigger an ops alert and pause the worker; not a per-row error.
+
+### 9.1 Per-row edge cases (all → delete silently)
+
+**CSV parse failures.** Headers missing, encoding issues, malformed rows (bad quoting). The whole upload can fail; individual malformed rows get dropped with a single-line entry in the upload's error summary: "12 rows dropped: malformed / missing required columns." The upload still completes with the surviving rows.
 
 **Duplicate upload within one CSV.** Intra-file dedup at Stage A. Reported to user in the upload summary: "4 rows removed as in-file duplicates."
 
@@ -765,7 +855,23 @@ All Overview tab queries accept a `range` query param: `day | week | month | all
 
 **Person with one name** (e.g., "Madonna, Madonna" from a music label). `first = 'madonna', last = 'madonna'`. Rendered email works fine; patterns `first` and `last` both match.
 
-**Single-name-only entries** (first name provided, no last name). Rows where last_name is null: patterns involving last-name mark them as unrenderable; email stays null; row still goes in pool but has `enrichment_status='failed'` after enrichment attempt. These get pulled in sheets with empty Email column — admin can filter them out via Pool Admin if that's a nuisance.
+**Single-name-only entries** (first name provided, no last name). On upload, if last_name empty: still admitted (some companies use `first@` pattern). Template rendering checks if the pattern needs last-name; if so and last is empty, the row gets deleted per the delete-on-error policy.
+
+**Row with email already in the CSV.** Rare — consultants sometimes paste exported data with emails already filled. Treated as a hint only: the email is *discarded* on upload (never trusted from unverified sources). The row goes through the normal enrichment pipeline. Rationale: consultant-provided emails are often stale or wrong, and trusting them would pollute pattern detection. If this causes friction later, add an opt-in "trust provided email" mode.
+
+### 9.2 Global errors (halt and alert)
+
+**Apollo credit exhausted (HTTP 402).** Worker detects `402` → sets an `ops_alerts` row → admin dashboard shows a top-of-page banner "Apollo credits exhausted — top up at apollo.io". Worker self-suspends (subsequent ticks no-op until credits are confirmed topped up via a manual "resume" button in admin Settings).
+
+**Apollo outage / 5xx.** Job re-queues with `last_error`; if attempts ≥ 3, the job is marked failed and its pending contacts are deleted (per delete-on-error). Admin sees a "worker backlog" metric on the dashboard.
+
+**OpenRouter unavailable (LLM down / rate limit).** Falls through the LLM tiers: Tier 2 LLM mapping fails → Tier 3 manual column-mapping UI. For name-parsing, falls back to a simple "split by last space" heuristic. System remains functional without LLM.
+
+**Google API 401 / invalid_grant (refresh token revoked).** All pull-sheet requests fall back to CSV download. Admin sees a "Google integration disconnected" banner with a link to re-run `setup-admin-oauth.ts`.
+
+**Supabase RLS misconfigured.** A failing RLS check returns empty results, not an error — can manifest as "I can't see my sheets." Addressed by comprehensive RLS unit tests (see §10), plus a dashboard query that surfaces any consultant whose expected data access would be denied.
+
+**Concurrent admin actions.** Two admins both approve the same pending consultant: second update is a no-op (idempotent). Two admins both force-refresh the same company: second is idempotent. Two admins both try to delete the same consultant: second returns 404 with a friendly message.
 
 ---
 
@@ -861,17 +967,27 @@ sourcing-tool/
       server.ts               -- server-side client (service role)
       client.ts               -- browser client (anon + user jwt)
     apollo/
-      client.ts               -- Apollo API wrapper with rate limiter
+      client.ts               -- bulk_match wrapper with rate limiter + retry/backoff
       patterns.ts             -- detectPattern, renderTemplate, PATTERNS
     google/
       oauth.ts                -- refresh token dance, cached access token
       sheets.ts               -- createSheetForConsultant, deleteSheet
+    llm/
+      openrouter.ts           -- OpenRouter client with fallback chain + JSON-mode helper
+      tasks/
+        column-mapping.ts     -- LLM call for CSV column inference (§18.1)
+        name-parsing.ts       -- LLM call to split "Dr. John Smith Jr." (§18.2)
+        company-canon.ts      -- LLM call for company canonicalization (§18.3)
+        domain-guess.ts       -- LLM call for domain guessing (§18.4)
+      cache.ts                -- deterministic cache: keyed by hash(prompt) → response
+      budget.ts               -- daily LLM spend tracker; pauses on cap
     enrichment/
       worker.ts               -- the cron entry point
-      sampling.ts             -- run_sampling_round
-      finder.ts               -- run_direct_finder
+      process-job.ts          -- process_enrichment_job (unified bulk_match flow)
+      tally.ts                -- tally_samples, template lock evaluation
     csv/
-      parse.ts                -- CSV parsing + column mapping
+      parse.ts                -- CSV parsing
+      map-columns.ts          -- Tier 1 alias match, delegates to lib/llm/tasks for Tier 2
       normalize.ts            -- normalize()
   supabase/
     migrations/
@@ -920,13 +1036,17 @@ sourcing-tool/
 
 ## 15. Assumptions & known open questions
 
-- **Apollo plan has sufficient credits.** Rough estimate: 100 net-new companies/month × ~10 samples avg = 1000 credits. Basic plan is typically 10k/month. Generous headroom.
-- **Vercel Hobby is sufficient initially.** 60s function timeout is tight but workable with batch size 20 and Apollo avg 2s. If hitting timeouts, upgrade to Pro or shrink batch.
-- **Google Workspace policies allow external sharing.** Admin's Drive must permit share-with-external (all `@berkeley.edu`); if SBC's Workspace restricts this, we fall back to sharing within `@berkeley.edu` only, which works since all consultants are on that domain.
-- **`auth.users.id` stable.** Supabase guarantees this but noted for migration safety.
-- **"SBC Consulting" is the display name everywhere** (sheet titles, email subject defaults if later added, dashboard header).
-- **Berkeley domain list.** `@berkeley.edu` is the only allowed domain. If subdomains like `@haas.berkeley.edu` need allowlisting, extend the CHECK constraint.
-- **Admin seat count.** Assumed one admin initially. Design supports multiple (just set `is_admin=true`); no changes needed.
+- **Apollo plan has sufficient credits.** With bulk_match and dual-use sampling, cost is roughly: new companies × 3 samples + UNRESOLVED companies × their pending rows ÷ 10 calls. Even a burst of 500 new companies = ~1,500 credits. Basic plan (10k/mo) is comfortable headroom.
+- **Consultant count is elastic.** The design makes no assumption about how many consultants there are — 3 or 30 works identically. The admin dashboard's per-consultant table paginates if needed. Vercel/Supabase free/hobby tiers comfortably handle both extremes at the expected upload rate (≤ a few thousand rows/day total).
+- **CSV size.** Assumed max ~10MB per upload (roughly 100k rows at typical row width) — fits Vercel's request body limits. Uploads larger than this get rejected at the API route with a clear error. Streaming/chunked upload is out of scope for v1.
+- **Vercel Hobby is sufficient initially.** 60s function timeout handles 10 jobs/tick × ~3s each with comfortable margin. If cron starts timing out, upgrade to Pro (300s limit) or lower batch size.
+- **Google Workspace policies allow external sharing.** Admin's Drive must permit share-with-`@berkeley.edu`; since all consultants are on that domain, restrictive external-sharing policies still allow intra-domain sharing.
+- **OpenRouter API key present.** LLM features (column mapping, name parsing, company canon, domain guess) degrade gracefully to heuristic/manual paths if OpenRouter is unreachable — the core Apollo + pool + sheet flows remain functional without any LLM call.
+- **Privacy / consent.** The tool stores personal data (names + inferred emails) of people who have not directly consented. Assumed SBC has reviewed this against Berkeley's privacy policy, CAN-SPAM, CASL, and any applicable obligations around unsolicited email. This is a business/legal assumption, not a technical one — the tool provides the delete-on-pull archive as a basic compliance primitive but does not implement specific compliance features (opt-out lists, deletion on request, etc.).
+- **Email deliverability is the consultant's problem.** We don't verify domains past Apollo's `verified` status, don't check MX records, don't handle bounces. Consultants' mail-merge tool is their own DKIM/SPF/reputation concern.
+- **`auth.users.id` stable.** Supabase guarantees this — noted for migration safety.
+- **Display name.** "SBC Consulting" is hardcoded in sheet titles ("SBC Sourcing — {name} — {date}") and the dashboard header.
+- **Berkeley domain.** `@berkeley.edu` is the only allowed sign-in domain; the CHECK constraint enforces this at the DB level. The Google OAuth client's `hd` param enforces it at sign-in.
 
 ---
 
@@ -937,9 +1057,11 @@ sourcing-tool/
 - **Template** — a `(pattern, domain)` pair learned for a company, e.g., `(first.last, tesla.com)`
 - **Sample** — a single Apollo lookup result used to infer a template
 - **Locked** — a company whose template has been confirmed at HIGH/MED/LOW confidence
-- **UNRESOLVED** — a company where we gave up on pattern detection and fall back to per-row Apollo Email Finder
+- **UNRESOLVED** — a company where pattern detection failed after 30 samples; future rows are still bulk_match'd (no template, just direct per-batch lookups)
 - **Archived** — a `(normalized_name, company)` that has been pulled in some sheet and can never re-enter the pool
 - **Pull** — the act of atomically claiming rows out of the pool into a consultant's Google Sheet
+- **Force sign-out** — admin action that revokes all Supabase Auth sessions for a consultant; approval and history retained, they just re-authenticate
+- **Delete account** — admin action that removes the Supabase Auth user; next sign-in from that email creates a brand-new unapproved consultants row
 
 ---
 
@@ -952,3 +1074,195 @@ These are choices where either option is fine; implementer picks whichever is cl
 - Specific Supabase migration tool (supabase CLI default)
 - Whether the enrichment-progress UI uses Supabase Realtime or a `setInterval` poll (poll is simpler and fine for this scale)
 - Whether to show Apollo cost in dollars or credits on the dashboard (show both, admin-toggleable)
+
+---
+
+## 18. LLM-assisted automation (OpenRouter)
+
+Several small steps in the pipeline are much more reliable with a cheap LLM than with heuristics. We call free / cheap models via [OpenRouter](https://openrouter.ai/), with a fallback chain so any model outage is survivable.
+
+### 18.0 Model choice & fallback chain
+
+Configured in `lib/llm/openrouter.ts`:
+
+```ts
+const MODEL_CHAIN = [
+  'google/gemini-flash-1.5-8b',           // ~$0.04/1M in — default
+  'google/gemini-flash-1.5',              // ~$0.075/1M in — fallback
+  'meta-llama/llama-3.1-8b-instruct:free',// free-tier — last resort
+];
+```
+
+Calls try models in order; on 429/5xx, fall through. Each call has a hard 512-token cap, JSON-mode enforced where supported, strict-mode response parsing (malformed JSON → skip LLM, use heuristic).
+
+**Budget guard** (`lib/llm/budget.ts`): a daily token counter persisted to Supabase. Default cap: $1/day of spend. When the budget is hit, LLM calls are short-circuited to heuristic-only mode until the next day. Admin can raise the cap in Settings.
+
+**Cache** (`lib/llm/cache.ts`): deterministic cache keyed by `sha256(model + prompt)`. A column-mapping result for the same CSV headers, or a canonicalization for the same pair of company strings, is computed exactly once.
+
+### 18.1 CSV column mapping
+
+**When:** on upload, if Tier-1 alias matching doesn't resolve all three required columns (`first_name`, `last_name`, `company`).
+**Input:** the header row + 3 sample data rows.
+**Prompt sketch:** "Given these CSV headers and sample rows, identify which column contains each field. Return JSON: `{first_name: '<header>', last_name: '<header>' | null, company: '<header>', confidence: 0-1}`."
+**Fallback:** manual column-mapping UI.
+**Expected cost:** ~100 input + 50 output tokens × ~1 call per upload ≈ $0.00002.
+
+### 18.2 Messy name parsing
+
+**When:** a row's `first_name` or `last_name` column is missing but a column like `full_name` or `name` is present, OR the `first_name` value contains multiple words ("Dr. John Smith Jr.").
+**Input:** the problematic values, batched up to 20 per call.
+**Prompt sketch:** "Split each full name into first_name and last_name. Remove titles (Dr., Mr., Mrs.) and suffixes (Jr., III, PhD). Return JSON array `[{first, last}, ...]` in the same order."
+**Fallback:** split on last whitespace; everything before = first, after = last.
+**Expected cost:** ~1 batch per upload × $0.00005 = negligible.
+
+### 18.3 Company canonicalization (dedup at the company level)
+
+**When:** during upload, a normalized company name is *close but not identical* to an existing company (Levenshtein ≤ 1, OR subset after stripping legal-entity suffixes like "Inc.", "LLC", "Corp.").
+**Input:** the new company string and up to 5 candidate existing companies.
+**Prompt sketch:** "Is the first name the same company as any of the candidates? Return JSON `{same_as: '<canonical_display>' | null, confidence: 0-1}`."
+**Fallback:** if LLM unavailable, treat as a new company (creates potential duplicates in `companies` but never causes data loss).
+**Expected cost:** roughly 1 call per *new* company per upload; typical upload has few new companies. Negligible.
+
+### 18.4 Domain guessing
+
+**When:** an UNRESOLVED company has no learned domain from Apollo (e.g., Apollo returned 0 work emails for all samples), and we want to try a best-effort bulk_match with a domain hint on the next batch.
+**Input:** the company display name (e.g., "Palantir Technologies").
+**Prompt sketch:** "What is the likely work-email domain for this company? Return JSON `{domain: '<domain.com>', confidence: 0-1}`. Return null if unsure."
+**Fallback:** `{normalized_name}.com` (e.g., "palantirtechnologies" → "palantirtechnologies.com" — usually wrong but cheap).
+**Expected cost:** 1 call per UNRESOLVED company × rare.
+
+### 18.5 Explicitly NOT using LLMs for
+
+- Per-row error triage (deleted silently — no LLM needed, user preference)
+- Pattern detection (deterministic; LLMs don't help)
+- Email rendering (deterministic)
+- Dedup key generation (deterministic)
+- Admin natural-language queries (v2 at earliest)
+- Any decision where a wrong LLM answer would corrupt shared data without a human-in-the-loop checkpoint
+
+### 18.6 Prompt discipline
+
+All LLM calls follow the same contract in `lib/llm/openrouter.ts`:
+- System prompt explains the tool's purpose ("You are a helper for a cold-outreach sourcing tool...")
+- Clear, structured output schema with JSON-mode enforcement when supported
+- Explicit "if unsure, return null" clause to avoid hallucinated confidence
+- Result validated against a zod schema before use; on schema violation, treat as a fallback case
+
+---
+
+## 19. Per-step deep dive — who / what / where / why / edge cases
+
+A step-by-step walk of every distinct operation the tool performs, with the five lenses. Intended as a checklist for the implementer to stress-test their mental model.
+
+### 19.1 Consultant signs in
+
+- **Who:** any @berkeley.edu Google account
+- **What:** Google OAuth flow, Supabase session issued, resolve-or-create consultants row
+- **Where:** `/auth/callback` route, `lib/auth/resolve-consultant.ts`
+- **Why:** identify them, gate on approval, keep `last_active_at` fresh
+- **Edges:**
+  - Non-berkeley.edu email → rejected by OAuth `hd` param → 403 landing page
+  - Email matches admin-pre-created row → backfill `auth_user_id`, skip approval screen if `is_approved=true`
+  - Email matches previously-deactivated row → create fresh row (partial unique index allows this)
+  - Session was force-revoked → Supabase auth fails → redirect to sign-in
+  - Email matches active row with different `auth_user_id` → shouldn't happen (partial unique + CHECK), but defensive: reject with "account conflict, contact admin"
+
+### 19.2 Consultant uploads a CSV
+
+- **Who:** approved consultant
+- **What:** parse CSV, map columns, validate rows, dedup, insert contacts, enqueue enrichment
+- **Where:** client parser `lib/csv/parse.ts` → `POST /api/uploads` → `lib/csv/map-columns.ts` → `lib/llm/tasks/column-mapping.ts` (if needed) → server handler
+- **Why:** get raw names into the pool
+- **Edges:**
+  - Double-click "Upload" → dedup by `upload_id` or by content hash (reject 2nd identical submission within 30s)
+  - CSV > 10MB → 413 response with clear message
+  - Wrong encoding (Latin-1 CSV with Unicode names) → detect BOM / auto-probe; if unsure, prompt user to re-export as UTF-8
+  - Wrong delimiter (`;` instead of `,`) → auto-detect via header-row comma count
+  - All rows invalid → upload completes with `row_count_admitted=0`, warning to consultant
+  - LLM column-mapping returns gibberish → schema validation fails → fall through to manual mapping UI
+  - Consultant uploads while another of their uploads is still enriching → both work; each row is tracked by its own upload_id
+  - Upload mid-admin-deactivation of the consultant → middleware rejects the request before DB writes
+  - CSV contains emoji or RTL text in names → normalize strips non-letter chars; row either passes or gets rejected if empty after normalization
+
+### 19.3 Company is canonicalized on upload
+
+- **Who:** server, during upload ingest
+- **What:** find-or-create companies row, potentially LLM-canonicalize near-duplicates
+- **Where:** `lib/companies/canon.ts`
+- **Why:** one company → one template cache; avoid "Google" and "Google LLC" becoming two templates
+- **Edges:**
+  - Company name is a typo ("Googel") → normalizes to "googel", doesn't match "google", creates a new company (expected — we aren't fuzzy-matching misspellings, only legal-suffix variants)
+  - Consultant uploads "Apple" but the existing company is "Apple Inc." → LLM confirms same, attached to existing
+  - Two consultants upload "Stripe" and "Stripe, Inc." in rapid succession → transaction-level unique on `name_normalized` handles the race; second insert fails → find the one that won, attach to it
+  - LLM unavailable → create new row (dup expected, admin can merge via Pool Admin tab if it matters)
+
+### 19.4 Worker picks a job and bulk_match's
+
+- **Who:** Vercel Cron → `/api/cron/enrich`
+- **What:** pop up to 10 jobs, per job bulk_match up to 10 contacts at that company
+- **Where:** `lib/enrichment/worker.ts` → `lib/enrichment/process-job.ts` → `lib/apollo/client.ts`
+- **Why:** fill emails + learn templates in the same call
+- **Edges:**
+  - Worker overlaps itself (previous tick still running) → advisory lock prevents second instance from proceeding
+  - bulk_match returns fewer matches than requested → unmatched rows deleted, matched rows proceed normally
+  - bulk_match returns a match whose organization doesn't match (cross-match) → sample recorded as ignored, row deleted
+  - bulk_match returns `email_status='guessed'` not `'verified'` → row deleted (we don't trust guessed emails)
+  - Apollo 429 rate-limit → job re-queued, worker stops draining this tick
+  - Apollo 402 credits-exhausted → ops alert, worker self-suspends, admin banner
+  - Template locks during a batch → the rest of the pending rows at that company fill from template on the spot, saving further API calls
+  - Company races: two workers somehow hit same company → `FOR UPDATE` + `SKIP LOCKED` on the pending-contacts query serialize them
+
+### 19.5 Consultant clicks "Get my sheet"
+
+- **Who:** approved consultant
+- **What:** atomically select up to 300 enriched rows (own-first, shared-fallback), delete from pool, archive, create Google Sheet
+- **Where:** `POST /api/sheets` → single SQL CTE transaction → `lib/google/sheets.ts`
+- **Why:** hand over a ready-to-mail-merge sheet
+- **Edges:**
+  - Pool empty → 0 rows, friendly error
+  - Pool has fewer than 300 → return what we have with a warning
+  - Two consultants hit the button simultaneously → `FOR UPDATE SKIP LOCKED` ensures disjoint subsets
+  - Google API fails during sheet creation → retry 3× with backoff; if still failing, fall back to CSV download; the DB rows are already archived (no rollback needed because the deduplication guarantee is already in effect)
+  - Google Sheets title collision (same consultant, same date, two pulls) → append a counter or timestamp to the title
+  - Consultant's Google Workspace blocks external sharing → since sharing is intra-@berkeley.edu, should be allowed; if it still fails, admin gets a dashboard warning
+  - Consultant clicks twice rapidly → second call either sees pool-lowered (fewer rows) or hits the advisory-lock pattern per consultant (one-pull-at-a-time)
+
+### 19.6 Daily cleanup cron
+
+- **Who:** `/api/cron/cleanup` (Vercel Cron, 02:00 PT)
+- **What:** find sheets where `scheduled_delete_at < now()`, delete the Google Drive file, mark `deleted_at`
+- **Where:** `app/api/cron/cleanup/route.ts` → `lib/google/sheets.ts`
+- **Why:** retention policy
+- **Edges:**
+  - Sheet already manually deleted in Drive → 404 from Google → mark `deleted_at` anyway
+  - Google API throttles → continue on error, next run picks up
+  - Admin's OAuth revoked → cleanup fails; banner in admin UI; next run will retry once re-authed
+
+### 19.7 Admin force-refreshes a template
+
+- **Who:** admin
+- **What:** reset a company's template state; optionally also re-enrich existing contacts at that company
+- **Where:** `POST /api/admin/templates/:id/refresh`
+- **Why:** the learned template was wrong (admin spotted a bad email pattern)
+- **Edges:**
+  - Worker is mid-processing the same company → optimistic concurrency check (locked_at timestamp); worker discards its result and re-enqueues
+  - Force-refresh with "also re-enrich current" → flips all contacts at that company back to pending; next worker tick re-processes them; when pattern is re-locked, the template renders new emails over old ones
+
+### 19.8 Admin deactivates / deletes a consultant
+
+- **Who:** admin (not self)
+- **What:** force sign-out, optionally delete auth.users, mark row deactivated
+- **Where:** `POST /api/admin/consultants/:id/{signout,deactivate,delete}`
+- **Why:** off-board a departed member, kill a compromised session
+- **Edges:**
+  - Admin tries to deactivate themselves → UI confirms with typed-word challenge; if they truly want to do it, it works, but they lose access
+  - Sole admin deactivates themselves → locked out; runbook documents DB-console recovery
+  - Consultant has pending uploads mid-enrichment at moment of delete → those enrichment jobs continue to completion; their rows stay in pool attributed to the now-deactivated consultant row (FK preserved)
+  - Deleted consultant tries to use a cached access token → Supabase session was revoked at delete → request returns 401
+
+---
+
+## 20. TL;DR — workflow & edge cases in one paragraph
+
+SBC Consulting is building a shared sourcing tool where club members sign in with their `@berkeley.edu` Google accounts (gated on admin approval in-app), upload CSVs of prospective contacts containing first name, last name, and company, and receive back a ready-to-mail-merge Google Sheet of 300 rows whenever they click "Get my sheet." The server deduplicates each upload against both the current pool and a permanent archive of every person the club has ever emailed, ensuring no prospect is ever contacted by the club twice, then enriches every row using Apollo's Bulk People Enrichment endpoint (up to 10 people per call) — those same returned emails double as the sample set for inferring each company's email pattern, which, once learned (3/3 unanimous or ≥60% after more samples), unlocks instant template-based enrichment for every future row at that company with no further Apollo spend. Known-template companies fill instantly on upload while unknown companies enqueue an enrichment job processed by a Vercel Cron worker every 60 seconds, and the consultant sees a live progress indicator until all their rows are enriched. When the consultant clicks "Get my sheet," a single SQL transaction claims up to 300 rows (their own uploads first, then the shared pool), hard-deletes them from the active table, writes the identity into a `dedup_archive` so those names can never re-enter the pool, and hands the rows to a server-side Google Sheets creation flow that produces a spreadsheet in the admin's Drive and shares edit access with the consultant's email. An admin dashboard provides eight feature areas — overview KPIs, per-consultant drill-downs, a template-cache-health panel, top-companies list, time-range filtering, consultant management (add/approve/force-sign-out/delete/promote), pool admin tools (delete a row, release an archive entry, bulk delete by company), and settings — with all consultant-scoped reads governed by Supabase Row-Level Security, so a bug at the app layer cannot leak data across accounts. Free or cheap OpenRouter models are used for discrete automation: inferring CSV column layouts when headers are weird, parsing messy full-name cells ("Dr. John Smith Jr."), canonicalizing near-duplicate companies ("Google" vs "Google LLC"), and guessing domains for unresolved companies — each call is token-capped, cached deterministically, budget-gated at $1/day, and falls back gracefully when OpenRouter is unavailable. The universal error-handling principle is "any per-row error deletes the row" — invalid CSV rows, dedup failures, missing Apollo matches, guessed email statuses, personal-domain emails, cross-company Apollo matches, and template-render failures all result in silent row deletion because at thousands of emails per day one lost contact is noise; only global errors (Apollo credits exhausted, Google API revoked, worker stuck) halt processing and raise an admin banner. Sheets auto-delete from the admin's Drive after 90 days via a daily cleanup cron (DB record of "sheet generated when by whom" persists indefinitely as the audit trail), and any sheet creation failure falls back to a direct CSV download so consultants are never blocked. Consultants are never duplicated even after delete: a partial unique index on `lower(email)` where `deactivated_at IS NULL` means a deactivated row stays in the DB for historical FK integrity but does not block a fresh sign-up from the same address, which creates a brand-new consultants row that must be re-approved. Admins can force sign-out a consultant to kill their active sessions without revoking approval, deactivate them (soft off-board), or delete their Supabase auth user entirely (hard off-board), and the admin dashboard's per-consultant drill-down shows every upload and every sheet they've generated with the exact row counts and generation timestamps. The system treats the cross-time outreach guarantee seriously: once any person's name + company pair is ever pulled into a sheet, the `dedup_archive` blocks that pair from ever being re-admitted to the pool, so even if another consultant uploads the same person months later, they are silently filtered out at upload time. Consultant count is deliberately not assumed — 3 or 30 works identically, with Vercel Hobby and Supabase free tier easily sufficient for the expected workload. Edge cases systematically accounted for include concurrent sheet pulls from two consultants (`FOR UPDATE SKIP LOCKED` guarantees disjoint subsets), worker overlap (Postgres advisory lock prevents double-processing), company canonicalization races (transaction-level unique on `name_normalized` serializes them), Apollo cross-matches (samples validated against the target company's normalized name), LLM outages (degrade to manual/heuristic paths), revoked Google tokens (fall back to CSV and show a banner), Apollo credit exhaustion (self-suspend worker and alert admin), and the special case of a single-admin lockout on self-deactivation (documented DB-console recovery path in the runbook). The net result is a sourcing tool that amortizes Apollo spend via learned templates, guarantees no double-outreach ever by design rather than convention, gives the admin full observability and operational controls, uses cheap LLMs only where they add real value without touching the correctness-critical data path, silently drops problem rows without blocking the workflow, and scales elastically from a handful of consultants to many dozens without architectural changes. The entire system is deployed as a single Next.js app on Vercel backed by a single Supabase project (Postgres + Auth + Vault + Realtime) with Vercel Cron triggering the enrichment worker every 60 seconds and a daily cleanup cron at 02:00 PT, so operationally there is one frontend, one database, one cron configuration, and three external APIs (Apollo, Google Sheets/Drive, OpenRouter) to monitor.
+
