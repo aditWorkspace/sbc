@@ -23,6 +23,16 @@ Concrete procedures for running, deploying, and recovering the tool. Copy-paste 
    ```
    Also add the `@berkeley.edu` hosted-domain restriction: in "Additional OAuth scopes" leave empty; in "Allow list of domains to login" (if the option exists) enter `berkeley.edu`.
 
+3.5 **Supabase Auth — URL Configuration (CRITICAL):** In the Supabase dashboard → Authentication → URL Configuration:
+   - **Site URL** must be set to this app's URL, NOT the default. For local dev: `http://localhost:3010`. For prod: `https://sbc-gold.vercel.app`.
+   - **Redirect URLs** must include every origin the sign-in flow may return to:
+     ```
+     http://localhost:3010/**
+     https://sbc-gold.vercel.app/**
+     https://*-adits-projects-7689d0e0.vercel.app/**
+     ```
+   Symptom if misconfigured: after signing in with Google, you get redirected to a completely different product (whatever the old Site URL pointed to) instead of landing in this app. Supabase silently falls back to Site URL if the `redirectTo` value isn't in the Redirect URLs allowlist.
+
 4. **Google Cloud OAuth — redirect URIs:** In the Google Cloud Console for your OAuth 2.0 client, add these Authorized redirect URIs:
    ```
    http://localhost:3010/auth/callback            (local consultant sign-in)
