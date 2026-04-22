@@ -107,14 +107,15 @@ export function UploadZone() {
           accept=".csv,text/csv"
           onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); }}
           className="hidden"
-          id="csv-input"
-          disabled={['reading', 'parsing', 'uploading'].includes(stage)}
         />
-        <label htmlFor="csv-input">
-          <Button asChild variant="outline" disabled={['reading', 'parsing', 'uploading'].includes(stage)}>
-            <span>{stage === 'idle' || stage === 'done' || stage === 'error' ? 'Choose CSV file' : STAGE_LABEL[stage]}</span>
-          </Button>
-        </label>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={['reading', 'parsing', 'uploading'].includes(stage)}
+          onClick={() => inputRef.current?.click()}
+        >
+          {stage === 'idle' || stage === 'done' || stage === 'error' ? 'Choose CSV file' : STAGE_LABEL[stage]}
+        </Button>
         <p className="text-xs text-muted-foreground mt-2">
           Columns: first name, last name (optional), company
         </p>
