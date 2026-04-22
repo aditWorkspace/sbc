@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { env } from '@/lib/env';
 import { supabaseService } from '@/lib/supabase/service';
 import { processEnrichmentJob } from '@/lib/enrichment/process-job';
-import { ApolloRateLimit, ApolloCreditsExhausted } from '@/lib/apollo/client';
+import { IcypeasRateLimit, IcypeasCreditsExhausted } from '@/lib/icypeas/client';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
@@ -34,13 +34,13 @@ export async function GET(req: Request) {
       }).eq('id', job.id);
       processed++;
     } catch (e: unknown) {
-      if (e instanceof ApolloRateLimit) {
+      if (e instanceof IcypeasRateLimit) {
         await supa.from('enrichment_jobs').update({
           status: 'queued', locked_at: null, last_error: 'rate_limit',
         }).eq('id', job.id);
         break;
       }
-      if (e instanceof ApolloCreditsExhausted) {
+      if (e instanceof IcypeasCreditsExhausted) {
         await supa.from('enrichment_jobs').update({
           status: 'queued', locked_at: null, last_error: 'credits_exhausted',
         }).eq('id', job.id);

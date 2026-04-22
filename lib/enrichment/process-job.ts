@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { apolloBulkMatch, ApolloCreditsExhausted, ApolloRateLimit } from '@/lib/apollo/client';
+import { icypeasBulkMatch, IcypeasCreditsExhausted, IcypeasRateLimit } from '@/lib/icypeas/client';
 import { detectPattern, isPersonalDomain, renderTemplate, type Pattern } from '@/lib/apollo/patterns';
 import { normalize } from '@/lib/csv/normalize';
 import { tallySamples, evaluateConfidence } from '@/lib/enrichment/tally';
@@ -27,15 +27,15 @@ export async function processEnrichmentJob(supa: SupabaseClient, companyId: stri
 
   let response;
   try {
-    response = await apolloBulkMatch(pending.map((p: any) => ({
+    response = await icypeasBulkMatch(pending.map((p: any) => ({
       first_name: p.first_name,
       last_name: p.last_name ?? undefined,
       organization_name: p.company_display,
     })));
   } catch (e) {
-    if (e instanceof ApolloRateLimit) throw e;
-    if (e instanceof ApolloCreditsExhausted) throw e;
-    // Other Apollo errors — delete these pending rows per policy; rethrow for retry/failure counting
+    if (e instanceof IcypeasRateLimit) throw e;
+    if (e instanceof IcypeasCreditsExhausted) throw e;
+    // Other Icypeas errors — delete these pending rows per policy; rethrow for retry/failure counting
     await supa.from('contacts').delete().in('id', pending.map((p: any) => p.id));
     throw e;
   }
