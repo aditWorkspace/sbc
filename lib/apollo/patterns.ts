@@ -2,7 +2,7 @@ import { normalize } from '@/lib/csv/normalize';
 
 export type Pattern =
   | 'first.last' | 'first_last' | 'firstlast' | 'flast' | 'f.last'
-  | 'first' | 'firstl' | 'last.first' | 'last';
+  | 'first' | 'firstl' | 'firstl2' | 'last.first' | 'last';
 
 type Renderer = (f: string, l: string) => string | null;
 const RENDERERS: Record<Pattern, Renderer> = {
@@ -13,12 +13,14 @@ const RENDERERS: Record<Pattern, Renderer> = {
   'f.last':      (f, l) => f && l ? `${f[0]}.${l}` : null,
   'first':       (f) => f || null,
   'firstl':      (f, l) => f && l ? `${f}${l[0]}` : null,
+  'firstl2':     (f, l) => f && l.length >= 2 ? `${f}${l.slice(0, 2)}` : null,
   'last.first':  (f, l) => f && l ? `${l}.${f}` : null,
   'last':        (_, l) => l || null,
 };
 
+// Order matters — first match wins. More specific patterns come first.
 export const PATTERN_ORDER: Pattern[] = [
-  'first.last','first_last','firstlast','flast','f.last','first','firstl','last.first','last',
+  'first.last','first_last','firstlast','flast','f.last','firstl2','firstl','first','last.first','last',
 ];
 
 export const PERSONAL_DOMAINS = new Set([

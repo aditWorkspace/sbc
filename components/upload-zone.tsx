@@ -127,7 +127,7 @@ export function UploadZone() {
           {stage === 'idle' || stage === 'done' || stage === 'error' ? 'Choose CSV file' : STAGE_LABEL[stage]}
         </Button>
         <p className="font-mono text-[11px] uppercase tracking-[1.2px] text-muted-foreground mt-3">
-          Columns: first name, last name (optional), company
+          Columns: first name, last name, company (all required)
         </p>
       </div>
 

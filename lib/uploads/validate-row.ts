@@ -16,17 +16,18 @@ export function validateRow(r: RawRow): ValidRow | null {
   const first = (r.first_name ?? '').trim();
   const last = (r.last_name ?? '').trim();
   const company = (r.company ?? '').trim();
-  if (!first || !company) return null;
+  if (!first || !last || !company) return null;
   if (first.length > MAX_FIELD_LEN || company.length > MAX_FIELD_LEN || last.length > MAX_FIELD_LEN) return null;
   const fn = normalize(first);
+  const ln = normalize(last);
   const cn = normalize(company);
-  if (!fn || !cn) return null;
+  if (!fn || !ln || !cn) return null;
   return {
     first_name: first,
-    last_name: last || null,
+    last_name: last,
     company_display: company,
     first_name_normalized: fn,
-    last_name_normalized: normalize(last),
+    last_name_normalized: ln,
     company_normalized: cn,
   };
 }
