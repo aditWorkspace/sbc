@@ -172,7 +172,10 @@ Supabase Auth is configured with Google OAuth. The Google OAuth client has:
 
 Supabase Auth webhook fires on every new signup → creates the `consultants` row with `is_approved=false, is_admin=false`.
 
-Admin seeding: a migration inserts the first admin's `consultants` row with `is_admin=true, is_approved=true` keyed by email. First admin must sign in at least once to have their `id` / `google_sub` populated; the migration matches them on email upsert.
+Admin seeding is a two-phase process:
+1. Migration `0010_admin_seed.sql` inserts a `consultants` row with the admin's `@berkeley.edu` email, `is_admin=true`, `is_approved=true`, `auth_user_id=NULL`.
+2. When the admin signs in for the first time, the Auth webhook finds the existing row by email (instead of creating a new one) and backfills `auth_user_id` + `display_name` from the Google profile.
+The same join-by-email pattern applies to consultants added via the admin UI (section 8.2).
 
 ### 4.3 Secrets
 
@@ -278,8 +281,7 @@ CREATE TABLE contacts (
   last_name_normalized text,
   company_id uuid NOT NULL REFERENCES companies(id),
   company_display text NOT NULL,          -- snapshot from upload for sheet output
-  normalized_key text GENERATED ALWAYS AS
-    (first_name_normalized || '|' || coalesce(last_name_normalized, '') || '|' || (SELECT name_normalized FROM companies WHERE id = company_id)) STORED,
+  normalized_key text NOT NULL,           -- "{first_norm}|{last_norm}|{company_norm}" — computed by app on insert
   email text,
   email_source text CHECK (email_source IN ('template', 'apollo_direct', 'manual')),
   enrichment_status text NOT NULL DEFAULT 'pending'
@@ -294,9 +296,10 @@ CREATE TABLE contacts (
 CREATE INDEX contacts_company_status_idx ON contacts(company_id, enrichment_status);
 CREATE INDEX contacts_uploader_idx ON contacts(uploaded_by);
 CREATE INDEX contacts_status_created_idx ON contacts(enrichment_status, created_at);
+CREATE INDEX contacts_normalized_key_idx ON contacts(normalized_key);
 ```
 
-Note: the `normalized_key` generated column requires the companies row to exist at INSERT time — ensured by the find-or-create step in the upload flow. If PG's generated column subquery restriction is a problem, compute in the app layer instead.
+Note: `normalized_key` is computed in the app on insert (Postgres generated columns cannot use subqueries, so we avoid that route). The upload flow knows the company's `name_normalized` after the find-or-create step, and concatenates the three normalized pieces before inserting. The same formula is used when inserting into `dedup_archive` during pull — both sides must match byte-for-byte, so the computation lives in one helper: `buildNormalizedKey(firstNorm, lastNorm, companyNorm)`.
 
 RLS:
 ```sql
@@ -474,7 +477,7 @@ Transitions (evaluated after each batch):
   SAMPLING (n=30)             LOW (≥60%) | UNRESOLVED
 ```
 
-Winner = the pattern with the highest `matching_samples / sample_size`. Ties broken by pattern order (index 0 wins). Domain: must also agree — all matching samples use the same domain. If the top pattern has two domains (e.g., some @tesla.com, some @teslamotors.com), the more frequent domain wins; if tied, the more common TLD/shorter domain wins as a last-resort tiebreaker.
+Winner = the pattern with the highest `matching_samples / sample_size`. Ties broken by pattern order (index 0 wins). Domains are compared as exact strings (case-insensitive) — `tesla.com` and `teslamotors.com` are different domains. If the top pattern has two domains, the more frequent domain wins; if frequencies tie, the shorter domain wins (heuristic: corporate primaries tend to be shorter than acquired/legacy ones).
 
 ### 6.5 Worker loop (pseudocode)
 
@@ -525,7 +528,8 @@ def run_sampling_round(company_id):
     people = apollo.people_search(
       organization_name=company.display_name,
       per_page=remaining_samples_needed * 2,  # over-fetch; some may lack emails
-      email_status=['verified', 'likely_to_engage'],  # skip Apollo-guessed
+      email_status=['verified'],  # Apollo values: verified | guessed | unavailable | bounced
+                                  # we only trust 'verified' for pattern inference
     )
     # NOTE: cost model — 1 credit per person returned with an email, regardless of our use
 
