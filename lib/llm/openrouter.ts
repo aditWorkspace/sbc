@@ -4,9 +4,9 @@ import { chargeTokens } from './budget';
 import { env } from '@/lib/env';
 
 const MODEL_CHAIN = [
-  'google/gemini-flash-1.5-8b',
-  'google/gemini-flash-1.5',
-  'meta-llama/llama-3.1-8b-instruct:free',
+  'google/gemini-2.0-flash-lite-001',
+  'google/gemini-2.0-flash-001',
+  'anthropic/claude-3-haiku',
 ];
 
 interface Args<T> {
