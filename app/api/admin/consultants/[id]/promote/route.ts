@@ -35,6 +35,10 @@ export async function POST(req: Request, { params }: { params: { id: string } })
   } else if (parsed.data.make_admin !== undefined) {
     await supa.from('consultants').update({ is_admin: parsed.data.make_admin }).eq('id', params.id);
   }
-
+  const { audit } = await import('@/lib/security/audit');
+  await audit(supa, auth.consultant.id, 'promote_consultant', {
+    type: 'consultant', id: params.id,
+    metadata: parsed.data as Record<string, unknown>,
+  });
   return NextResponse.json({ ok: true });
 }

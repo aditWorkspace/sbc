@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/current';
 import { supabaseService } from '@/lib/supabase/service';
+import { audit } from '@/lib/security/audit';
 
 export async function POST(_req: Request, { params }: { params: { id: string } }) {
   const auth = await requireAdmin();
@@ -13,5 +14,6 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
     deactivated_by: auth.consultant.id,
     is_approved: false,
   }).eq('id', params.id);
+  await audit(supa, auth.consultant.id, 'deactivate_consultant', { type: 'consultant', id: params.id });
   return NextResponse.json({ ok: true });
 }

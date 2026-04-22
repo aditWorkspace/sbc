@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/current';
 import { supabaseService } from '@/lib/supabase/service';
+import { audit } from '@/lib/security/audit';
 
 export async function POST(_req: Request, { params }: { params: { id: string } }) {
   const auth = await requireAdmin();
@@ -11,5 +12,6 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
     await supa.auth.admin.signOut(c.auth_user_id, 'global');
   }
   await supa.from('consultants').update({ sessions_revoked_at: new Date().toISOString() }).eq('id', params.id);
+  await audit(supa, auth.consultant.id, 'force_signout_consultant', { type: 'consultant', id: params.id });
   return NextResponse.json({ ok: true });
 }

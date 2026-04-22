@@ -22,5 +22,9 @@ export async function POST(req: Request, { params }: { params: { id: string } })
     }).eq('company_id', params.id).eq('enrichment_status', 'enriched');
   }
   await supa.from('enrichment_jobs').insert({ company_id: params.id }).then(() => {}, () => {});
+  const { audit } = await import('@/lib/security/audit');
+  await audit(supa, auth.consultant.id, 'force_refresh_template', {
+    type: 'company', id: params.id, metadata: { reEnrich },
+  });
   return NextResponse.json({ ok: true });
 }

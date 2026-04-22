@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/current';
 import { supabaseService } from '@/lib/supabase/service';
+import { audit } from '@/lib/security/audit';
 
 export async function POST(_req: Request, { params }: { params: { id: string } }) {
   const auth = await requireAdmin();
@@ -9,5 +10,6 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
   await supa.from('consultants').update({
     is_approved: true, approved_at: new Date().toISOString(), approved_by: auth.consultant.id,
   }).eq('id', params.id);
+  await audit(supa, auth.consultant.id, 'approve_consultant', { type: 'consultant', id: params.id });
   return NextResponse.json({ ok: true });
 }

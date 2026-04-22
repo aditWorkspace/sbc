@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { requireApprovedConsultant } from '@/lib/auth/current';
 import { supabaseService } from '@/lib/supabase/service';
+import { checkRateLimit } from '@/lib/security/rate-limit';
 import { parseCsv } from '@/lib/csv/parse';
 import { mapColumnsByAlias } from '@/lib/csv/map-columns';
 import { mapColumnsLlm } from '@/lib/llm/tasks/column-mapping';
@@ -24,6 +25,11 @@ export async function POST(req: Request) {
   const auth = await requireApprovedConsultant();
   if ('error' in auth) {
     return NextResponse.json({ error: auth.error }, { status: auth.error === 'forbidden' ? 403 : 401 });
+  }
+
+  const rl = checkRateLimit(`uploads:${auth.consultant.id}`, 10);
+  if (!rl.allowed) {
+    return NextResponse.json({ error: 'rate_limit', retry_in_seconds: rl.resetIn }, { status: 429 });
   }
 
   const body = await req.json().catch(() => null);

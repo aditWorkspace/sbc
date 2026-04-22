@@ -34,6 +34,10 @@ export async function POST(req: Request, { params }: { params: { id: string } })
   // Sync is_admin: true for admin and owner roles
   const isAdmin = newRole === 'admin' || newRole === 'owner';
   await supa.from('consultants').update({ role: newRole, is_admin: isAdmin }).eq('id', targetId);
-
+  const { audit } = await import('@/lib/security/audit');
+  await audit(supa, viewerId, 'change_role', {
+    type: 'consultant', id: targetId,
+    metadata: { from: target?.role ?? null, to: newRole },
+  });
   return NextResponse.json({ ok: true });
 }
