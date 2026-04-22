@@ -36,6 +36,7 @@ export default async function Dashboard() {
 
   const recentUploads = recentUploadsRes.data ?? [];
   const recentSheets = recentSheetsRes.data ?? [];
+  const isJrConsultant = c.role === 'jr_consultant';
 
   return (
     <div className="space-y-6">
@@ -131,62 +132,73 @@ export default async function Dashboard() {
         </div>
       )}
 
-      {/* ── Get a sheet ──────────────────────────────────────── */}
-      <Card className="bg-card border-border">
-        <CardHeader>
-          <CardTitle className="text-base font-medium">Get a sheet</CardTitle>
-        </CardHeader>
-        <CardContent><GetSheetButton /></CardContent>
-      </Card>
-
-      {/* Recent sheets sub-section */}
-      {recentSheets.length > 0 && (
-        <div className="space-y-2 -mt-2 px-1">
-          <p className="font-mono text-[11px] uppercase tracking-[1.2px] text-muted-foreground">Recent sheets</p>
-          <div className="space-y-1.5">
-            {recentSheets.map(s => (
-              <div
-                key={s.id}
-                className="flex items-center justify-between rounded-md border border-border bg-card px-3 py-2 text-sm"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <span className="text-muted-foreground text-xs font-mono shrink-0">
-                    {new Date(s.created_at).toLocaleDateString()}
-                  </span>
-                  <span className="text-muted-foreground text-xs font-mono">
-                    <span className="text-foreground">{s.row_count}</span> rows
-                  </span>
-                </div>
-                <div className="flex items-center gap-3 shrink-0">
-                  {s.google_sheet_url && s.status === 'active' ? (
-                    <a
-                      href={s.google_sheet_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-primary hover:underline text-xs font-mono"
-                    >
-                      Open sheet
-                    </a>
-                  ) : null}
-                  <span className={[
-                    'font-mono text-[10px] uppercase tracking-[1.2px] px-2 py-0.5 rounded-full border',
-                    s.status === 'active'
-                      ? 'text-primary border-primary/30 bg-primary/5'
-                      : 'text-muted-foreground border-border',
-                  ].join(' ')}>
-                    {s.status}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-          <Link
-            href="/history"
-            className="text-xs text-primary hover:underline font-mono tracking-wide"
-          >
-            See all sheets →
-          </Link>
+      {/* ── Get a sheet / Jr consultant banner ──────────────── */}
+      {isJrConsultant ? (
+        <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/5 p-4 text-sm">
+          <p className="font-semibold text-yellow-600 dark:text-yellow-400">You&apos;re a Jr Consultant</p>
+          <p className="mt-1 text-muted-foreground">
+            Focus on uploading leads. You&apos;ll be promoted to full consultant to pull sheets.
+          </p>
         </div>
+      ) : (
+        <>
+          <Card className="bg-card border-border">
+            <CardHeader>
+              <CardTitle className="text-base font-medium">Get a sheet</CardTitle>
+            </CardHeader>
+            <CardContent><GetSheetButton /></CardContent>
+          </Card>
+
+          {/* Recent sheets sub-section */}
+          {recentSheets.length > 0 && (
+            <div className="space-y-2 -mt-2 px-1">
+              <p className="font-mono text-[11px] uppercase tracking-[1.2px] text-muted-foreground">Recent sheets</p>
+              <div className="space-y-1.5">
+                {recentSheets.map(s => (
+                  <div
+                    key={s.id}
+                    className="flex items-center justify-between rounded-md border border-border bg-card px-3 py-2 text-sm"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className="text-muted-foreground text-xs font-mono shrink-0">
+                        {new Date(s.created_at).toLocaleDateString()}
+                      </span>
+                      <span className="text-muted-foreground text-xs font-mono">
+                        <span className="text-foreground">{s.row_count}</span> rows
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0">
+                      {s.google_sheet_url && s.status === 'active' ? (
+                        <a
+                          href={s.google_sheet_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-primary hover:underline text-xs font-mono"
+                        >
+                          Open sheet
+                        </a>
+                      ) : null}
+                      <span className={[
+                        'font-mono text-[10px] uppercase tracking-[1.2px] px-2 py-0.5 rounded-full border',
+                        s.status === 'active'
+                          ? 'text-primary border-primary/30 bg-primary/5'
+                          : 'text-muted-foreground border-border',
+                      ].join(' ')}>
+                        {s.status}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <Link
+                href="/history"
+                className="text-xs text-primary hover:underline font-mono tracking-wide"
+              >
+                See all sheets →
+              </Link>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

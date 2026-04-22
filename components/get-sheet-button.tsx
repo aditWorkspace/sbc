@@ -29,6 +29,16 @@ export function GetSheetButton() {
       setErr('Pool empty — ask a teammate to upload a CSV first.');
       return;
     }
+    if (res.status === 403) {
+      const body = await res.json().catch(() => ({}));
+      setStage('error');
+      if (body.error === 'jr_consultant_cannot_pull') {
+        setErr(body.message ?? 'Jr consultants cannot pull sheets yet.');
+      } else {
+        setErr('You do not have permission to pull a sheet.');
+      }
+      return;
+    }
     setStage('creating');
     const ct = res.headers.get('content-type') ?? '';
     if (ct.includes('text/csv')) {
