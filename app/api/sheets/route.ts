@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requireApprovedConsultant } from '@/lib/auth/current';
+import { requireCanPullSheet } from '@/lib/auth/current';
 import { supabaseService } from '@/lib/supabase/service';
 import { createSheetForConsultant, retryWithBackoff } from '@/lib/google/sheets';
 
@@ -7,9 +7,15 @@ const DEFAULT_MAX_ROWS = 300;
 export const maxDuration = 60;
 
 export async function POST() {
-  const auth = await requireApprovedConsultant();
+  const auth = await requireCanPullSheet();
   if ('error' in auth) {
-    return NextResponse.json({ error: auth.error }, { status: auth.error === 'forbidden' ? 403 : 401 });
+    if (auth.error === 'forbidden') {
+      return NextResponse.json(
+        { error: 'jr_consultant_cannot_pull', message: 'Jr consultants can source emails but cannot pull sheets yet.' },
+        { status: 403 }
+      );
+    }
+    return NextResponse.json({ error: auth.error }, { status: 401 });
   }
 
   const supa = supabaseService();

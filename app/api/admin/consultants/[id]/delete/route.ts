@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
-import { requireAdmin } from '@/lib/auth/current';
+import { requireOwner } from '@/lib/auth/current';
 import { supabaseService } from '@/lib/supabase/service';
 
 export async function POST(_req: Request, { params }: { params: { id: string } }) {
-  const auth = await requireAdmin();
+  const auth = await requireOwner();
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.error === 'forbidden' ? 403 : 401 });
   const supa = supabaseService();
   const { data: c } = await supa.from('consultants').select('auth_user_id').eq('id', params.id).single();
