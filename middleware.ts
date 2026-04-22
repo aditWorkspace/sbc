@@ -20,6 +20,16 @@ export async function middleware(req: NextRequest) {
   );
   // Refresh session if expired; ignores errors
   await supabase.auth.getUser();
+
+  // Defense-in-depth security headers
+  res.headers.set('X-Frame-Options', 'DENY');
+  res.headers.set('X-Content-Type-Options', 'nosniff');
+  res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), interest-cohort=()');
+  res.headers.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
+  // Intentionally NOT setting a strict CSP because Next.js injects inline scripts
+  // for RSC bootstrapping. A loose CSP is worse than none — revisit in v2.
+
   return res;
 }
 
