@@ -166,6 +166,7 @@ export type Database = {
           is_admin: boolean
           is_approved: boolean
           last_active_at: string | null
+          role: string
           sessions_revoked_at: string | null
         }
         Insert: {
@@ -181,6 +182,7 @@ export type Database = {
           is_admin?: boolean
           is_approved?: boolean
           last_active_at?: string | null
+          role?: string
           sessions_revoked_at?: string | null
         }
         Update: {
@@ -196,6 +198,7 @@ export type Database = {
           is_admin?: boolean
           is_approved?: boolean
           last_active_at?: string | null
+          role?: string
           sessions_revoked_at?: string | null
         }
         Relationships: [
@@ -520,6 +523,7 @@ export type Database = {
           is_admin: boolean
           is_approved: boolean
           last_active_at: string | null
+          role: string
           sessions_revoked_at: string | null
         }
         SetofOptions: {
