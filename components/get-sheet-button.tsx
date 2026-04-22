@@ -29,7 +29,7 @@ export function GetSheetButton() {
       setErr('Pool empty — ask a teammate to upload a CSV first.');
       return;
     }
-    setStage('creating'); // server is doing both claim and sheet creation; we fake the stage transition
+    setStage('creating');
     const ct = res.headers.get('content-type') ?? '';
     if (ct.includes('text/csv')) {
       const blob = await res.blob();
@@ -62,7 +62,11 @@ export function GetSheetButton() {
 
   return (
     <div className="space-y-3">
-      <Button onClick={pull} disabled={isBusy}>
+      <Button
+        onClick={pull}
+        disabled={isBusy}
+        className="rounded-full px-6 py-2.5 bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition-colors"
+      >
         {isBusy ? STAGE_LABEL[stage] : 'Get my sheet (300 rows)'}
       </Button>
       {isBusy && (
@@ -73,8 +77,20 @@ export function GetSheetButton() {
           </p>
         </div>
       )}
-      {success && <Alert><AlertDescription>{success}</AlertDescription></Alert>}
-      {err && <Alert variant="destructive"><AlertDescription>{err}</AlertDescription></Alert>}
+      {success && (
+        <Alert className="border-amber-500/30 bg-amber-500/5">
+          <AlertDescription className="text-amber-300 text-sm">{success}</AlertDescription>
+        </Alert>
+      )}
+      {err && (
+        <Alert className={
+          err.includes('Pool empty')
+            ? 'border-destructive/50 bg-destructive/5'
+            : 'border-destructive/50 bg-destructive/5'
+        }>
+          <AlertDescription className="text-destructive text-sm">{err}</AlertDescription>
+        </Alert>
+      )}
     </div>
   );
 }

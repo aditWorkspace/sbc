@@ -22,6 +22,16 @@ const STAGE_LABEL: Record<Stage, string> = {
   error: 'Error',
 };
 
+const STAT_ROWS: { key: keyof Summary; label: string }[] = [
+  { key: 'raw',               label: 'RAW ROWS' },
+  { key: 'admitted',          label: 'ADMITTED' },
+  { key: 'rejected',          label: 'REJECTED' },
+  { key: 'alreadyInPool',     label: 'ALREADY IN POOL' },
+  { key: 'archived',          label: 'PREV. EMAILED' },
+  { key: 'previouslyAttempted', label: 'CREDIT SAVED' },
+  { key: 'enrichedInstantly', label: 'ENRICHED' },
+];
+
 export function UploadZone() {
   const [stage, setStage] = useState<Stage>('idle');
   const [msg, setMsg] = useState<string>('');
@@ -51,7 +61,7 @@ export function UploadZone() {
         return;
       }
     };
-    tick(); // immediate tick
+    tick();
     const id = setInterval(tick, 2000);
     return () => clearInterval(id);
   }, [stage, summary]);
@@ -64,7 +74,6 @@ export function UploadZone() {
     const text = await file.text();
 
     setStage('parsing');
-    // Quick count — real parsing happens server-side
     const approxRows = Math.max(0, text.split('\n').filter(l => l.trim()).length - 1);
     setMsg(`Parsing CSV — ${approxRows} rows detected...`);
 
@@ -100,7 +109,8 @@ export function UploadZone() {
 
   return (
     <div className="space-y-3">
-      <div className="border-2 border-dashed rounded-lg p-8 text-center">
+      {/* Drop zone */}
+      <div className="border-2 border-dashed border-border rounded-lg p-8 text-center hover:border-primary/40 transition-colors">
         <input
           ref={inputRef}
           type="file"
@@ -110,33 +120,36 @@ export function UploadZone() {
         />
         <Button
           type="button"
-          variant="outline"
+          className="rounded-full px-6 py-2.5 bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition-colors"
           disabled={['reading', 'parsing', 'uploading'].includes(stage)}
           onClick={() => inputRef.current?.click()}
         >
           {stage === 'idle' || stage === 'done' || stage === 'error' ? 'Choose CSV file' : STAGE_LABEL[stage]}
         </Button>
-        <p className="text-xs text-muted-foreground mt-2">
+        <p className="font-mono text-[11px] uppercase tracking-[1.2px] text-muted-foreground mt-3">
           Columns: first name, last name (optional), company
         </p>
       </div>
 
       {(stage === 'reading' || stage === 'parsing' || stage === 'uploading') && (
-        <Alert>
-          <AlertDescription>{msg}</AlertDescription>
+        <Alert className="border-border bg-card">
+          <AlertDescription className="text-sm text-muted-foreground">{msg}</AlertDescription>
         </Alert>
       )}
 
       {summary && (
         <div className="space-y-2">
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1 text-xs text-muted-foreground">
-            <span>Raw rows: <span className="text-foreground font-medium">{summary.raw}</span></span>
-            <span>Admitted: <span className="text-foreground font-medium">{summary.admitted}</span></span>
-            <span>Rejected (bad data): <span className="text-foreground font-medium">{summary.rejected}</span></span>
-            <span>Already in pool: <span className="text-foreground font-medium">{summary.alreadyInPool}</span></span>
-            <span>Previously emailed: <span className="text-foreground font-medium">{summary.archived}</span></span>
-            <span>Previously attempted (credit saved): <span className="text-foreground font-medium">{summary.previouslyAttempted ?? 0}</span></span>
-            <span>Enriched instantly: <span className="text-foreground font-medium">{summary.enrichedInstantly}</span></span>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1.5">
+            {STAT_ROWS.map(({ key, label }) => (
+              <div key={key} className="flex items-center gap-2">
+                <span className="font-mono text-[11px] uppercase tracking-[1.2px] text-muted-foreground">
+                  {label}:
+                </span>
+                <span className="text-sm font-medium text-foreground">
+                  {summary[key] as number}
+                </span>
+              </div>
+            ))}
           </div>
 
           {(stage === 'processing' || stage === 'done') && summary.admitted > 0 && (
@@ -147,7 +160,7 @@ export function UploadZone() {
                     ? `Enriching via Icypeas: ${enriched} of ${total} done, ${pending} pending...`
                     : `Enrichment complete: ${enriched} of ${total} enriched${total - enriched > 0 ? `, ${total - enriched} failed or deleted` : ''}`}
                 </span>
-                <span>{progressPct}%</span>
+                <span className="font-mono">{progressPct}%</span>
               </div>
               <Progress value={progressPct} />
               {stage === 'processing' && (
@@ -156,9 +169,9 @@ export function UploadZone() {
                 </p>
               )}
               {stage === 'processing' && pending > 0 && Date.now() - (submitTime ?? 0) > 60_000 && (
-                <p className="text-xs text-amber-600">
+                <p className="text-xs text-amber-400">
                   Enrichment seems slow — if this is local dev, trigger the worker:
-                  <code className="bg-muted px-1 mx-1 text-xs">curl -H &quot;Authorization: Bearer $CRON_SECRET&quot; http://localhost:3010/api/cron/enrich</code>
+                  <code className="bg-muted px-1 mx-1 text-xs font-mono">curl -H &quot;Authorization: Bearer $CRON_SECRET&quot; http://localhost:3010/api/cron/enrich</code>
                 </p>
               )}
             </div>
@@ -167,7 +180,7 @@ export function UploadZone() {
       )}
 
       {error && (
-        <Alert variant="destructive">
+        <Alert variant="destructive" className="border-destructive/50 bg-destructive/5">
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
