@@ -26,8 +26,10 @@ import { createSheetForConsultant, describeGoogleError } from '@/lib/google/shee
 import { buildNormalizedKey, normalize } from '@/lib/csv/normalize';
 
 const TARGET_ROWS = Number(process.argv[2] ?? 1000);
-// Uses real Berkeley email so Google's Drive share doesn't reject it as non-existent.
-const TEST_EMAIL = 'aditmittal@berkeley.edu';
+// Uses a dedicated seed consultant so fake data doesn't pollute real consultants' stats.
+// If MODE=test the final step also calls Google Sheets to verify end-to-end; set MODE=seed to skip.
+const TEST_EMAIL = 'system-seed@berkeley.edu';
+const MODE = process.env.SEED_MODE ?? 'test';  // 'test' or 'seed'
 
 const FIRST_NAMES = ['Ava','Bob','Carla','Dan','Erin','Frank','Grace','Hank','Iris','Jack','Kate','Liam','Maya','Noah','Olivia','Paul','Quinn','Ruth','Sam','Tara','Uma','Victor','Wendy','Xavier','Yara','Zack','Alex','Beth','Chris','Diana'];
 const LAST_NAMES = ['Smith','Johnson','Williams','Brown','Jones','Garcia','Miller','Davis','Lopez','Wilson','Anderson','Taylor','Thomas','Hernandez','Moore','Martin','Jackson','Thompson','White','Harris'];
@@ -133,6 +135,11 @@ async function main() {
   await supa.from('uploads').update({
     row_count_admitted: inserted, status: 'complete', completed_at: new Date().toISOString(),
   }).eq('id', uploadId);
+
+  if (MODE === 'seed') {
+    console.log(`\n🌱 Seed complete — ${inserted} rows inserted, pool ready for real consultants to pull.`);
+    process.exit(0);
+  }
 
   console.log(`[6] Calling pull_sheet RPC for 300 rows...`);
   const { data: pulledRows, error: pullErr } = await supa.rpc('pull_sheet', {

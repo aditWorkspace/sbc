@@ -78,6 +78,38 @@ export async function POST(req: Request) {
     }
   }
 
-  const result = await ingestUpload(supabaseService(), auth.consultant.id, filename ?? null, raw);
+  const supa = supabaseService();
+  const result = await ingestUpload(supa, auth.consultant.id, filename ?? null, raw);
+
+  // Auto-trigger enrichment for the jobs this upload just created — on Vercel Hobby
+  // we don't have minute-level cron, and on localhost there's no cron at all, so
+  // drain the queue inline. Bounded by maxDuration and BUDGET_MS.
+  if (result.pending > 0) {
+    const { processEnrichmentJob } = await import('@/lib/enrichment/process-job');
+    const { IcypeasRateLimit, IcypeasCreditsExhausted } = await import('@/lib/icypeas/client');
+    const BUDGET_MS = 45_000;
+    const deadline = Date.now() + BUDGET_MS;
+    const { data: jobs } = await supa.from('enrichment_jobs')
+      .select('id, company_id').eq('status', 'queued').order('created_at').limit(20);
+    for (const job of (jobs ?? [])) {
+      if (Date.now() > deadline) break;
+      try {
+        await supa.from('enrichment_jobs').update({
+          status: 'running', locked_at: new Date().toISOString(),
+        }).eq('id', job.id);
+        await processEnrichmentJob(supa, job.company_id);
+        await supa.from('enrichment_jobs').update({
+          status: 'done', completed_at: new Date().toISOString(),
+        }).eq('id', job.id);
+      } catch (e) {
+        // any failure just flips back to queued for the next tick / cron
+        await supa.from('enrichment_jobs').update({
+          status: 'queued', locked_at: null,
+          last_error: (e as Error)?.message ?? String(e),
+        }).eq('id', job.id);
+        if (e instanceof IcypeasRateLimit || e instanceof IcypeasCreditsExhausted) break;
+      }
+    }
+  }
   return NextResponse.json(result);
 }
