@@ -1,4 +1,27 @@
 // Run once, locally: `pnpm exec tsx scripts/setup-admin-oauth.ts`
+// Loads .env.local directly since tsx (unlike Next.js) doesn't do it automatically.
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+function loadEnvLocal() {
+  try {
+    const content = readFileSync(resolve(process.cwd(), '.env.local'), 'utf8');
+    for (const rawLine of content.split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq < 0) continue;
+      const key = line.slice(0, eq).trim();
+      const val = line.slice(eq + 1).trim();
+      if (key && process.env[key] === undefined) process.env[key] = val;
+    }
+  } catch (e) {
+    console.error('Could not read .env.local — make sure you run this from the project root.');
+    throw e;
+  }
+}
+loadEnvLocal();
+
 import { google } from 'googleapis';
 import http from 'node:http';
 import open from 'open';
