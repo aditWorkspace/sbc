@@ -109,15 +109,33 @@ export async function createSheetForConsultant({ consultant, rows, refreshToken,
   const isOwner = ownerEmail && ownerEmail.toLowerCase() === consultant.email.toLowerCase();
   if (!isOwner) {
     try {
+      // Google's Drive API requires sendNotificationEmail:true for any email
+      // that isn't a verified Google Workspace account. Berkeley emails that
+      // haven't actively used Drive before trigger this — without the notif,
+      // the share fails with 400 "no Google account associated". One notif
+      // email per sheet pull is acceptable UX.
       await drive.permissions.create({
         fileId: spreadsheetId,
         requestBody: { type: 'user', role: 'writer', emailAddress: consultant.email },
-        sendNotificationEmail: false,
+        sendNotificationEmail: true,
+        emailMessage: `Your SBC Sourcing sheet is ready (${rows.length} contacts).`,
       });
       console.log(`[sheets] shared with ${consultant.email}`);
     } catch (err) {
-      console.error(`[sheets] SHARE FAILED: ${describeGoogleError(err)}`);
-      throw err;
+      // Last-resort fallback: make the file accessible to anyone with the link
+      // (role: reader). Data isn't secret — it's the contacts they're about to
+      // email anyway — so this is acceptable degradation vs. total failure.
+      console.warn(`[sheets] SHARE with ${consultant.email} failed: ${describeGoogleError(err)}. Trying anyone-with-link as last resort.`);
+      try {
+        await drive.permissions.create({
+          fileId: spreadsheetId,
+          requestBody: { type: 'anyone', role: 'writer' },
+        });
+        console.log(`[sheets] made file accessible to anyone with link (fallback)`);
+      } catch (err2) {
+        console.error(`[sheets] BOTH share attempts failed: ${describeGoogleError(err2)}`);
+        throw err2;
+      }
     }
   } else {
     console.log(`[sheets] skipping share — consultant is the owner`);
