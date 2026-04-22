@@ -9,7 +9,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
   if (!c.is_admin) redirect('/dashboard');
   return (
     <div>
-      <NavAdmin name={c.display_name ?? c.email} />
+      <NavAdmin name={c.display_name ?? c.email} role={(c.role ?? 'admin') as 'owner' | 'admin'} />
       <main className="max-w-6xl mx-auto p-6">{children}</main>
     </div>
   );

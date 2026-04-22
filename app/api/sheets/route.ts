@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { requireCanPullSheet } from '@/lib/auth/current';
 import { supabaseService } from '@/lib/supabase/service';
 import { createSheetForConsultant, retryWithBackoff } from '@/lib/google/sheets';
+import { checkRateLimit } from '@/lib/security/rate-limit';
+import { publicError } from '@/lib/security/safe-error';
 
 const DEFAULT_MAX_ROWS = 300;
 export const maxDuration = 60;
@@ -18,13 +20,19 @@ export async function POST() {
     return NextResponse.json({ error: auth.error }, { status: 401 });
   }
 
+  const rl = checkRateLimit(`sheets:${auth.consultant.id}`, 5);
+  if (!rl.allowed) {
+    return NextResponse.json({ error: 'rate_limit', retry_in_seconds: rl.resetIn }, { status: 429 });
+  }
+
   const supa = supabaseService();
   const { data: rows, error } = await supa.rpc('pull_sheet', {
     p_consultant_id: auth.consultant.id,
     p_max_rows: DEFAULT_MAX_ROWS,
   });
   if (error) {
-    return NextResponse.json({ error: 'pull_failed', detail: error.message }, { status: 500 });
+    console.error('[api/sheets] pull_sheet rpc error:', error);
+    return NextResponse.json(publicError(error, 'pull_failed'), { status: 500 });
   }
   const rowArr = (rows ?? []) as Array<{
     id: string; first_name: string; last_name: string | null;
@@ -43,7 +51,8 @@ export async function POST() {
     from_shared_pool: rowArr.length - fromOwn,
   }).select('id').single();
   if (sheetErr || !sheetInsert) {
-    return NextResponse.json({ error: 'sheet_record_failed', detail: sheetErr?.message }, { status: 500 });
+    console.error('[api/sheets] sheet insert error:', sheetErr);
+    return NextResponse.json(publicError(sheetErr, 'sheet_record_failed'), { status: 500 });
   }
   const sheetDbId = sheetInsert.id;
 
