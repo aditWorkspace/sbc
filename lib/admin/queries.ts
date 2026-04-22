@@ -48,6 +48,30 @@ export async function overviewKpis(supa: SupabaseClient, range: Range) {
   };
 }
 
+export async function queueSnapshot(supa: SupabaseClient) {
+  const [queued, running, pendingContacts] = await Promise.all([
+    supa.from('enrichment_jobs').select('*', { count: 'exact', head: true }).eq('status', 'queued'),
+    supa.from('enrichment_jobs').select('*', { count: 'exact', head: true }).eq('status', 'running'),
+    supa.from('contacts').select('*', { count: 'exact', head: true }).eq('enrichment_status', 'pending'),
+  ]);
+  return {
+    queued: queued.count ?? 0,
+    running: running.count ?? 0,
+    pendingContacts: pendingContacts.count ?? 0,
+  };
+}
+
+export async function recentActivity(supa: SupabaseClient, limit = 10) {
+  const { data } = await supa
+    .from('apollo_samples')
+    .select(
+      'person_first_name, person_last_name, email_returned, email_ignored_reason, detected_pattern, detected_domain, sampled_at, company_id',
+    )
+    .order('sampled_at', { ascending: false })
+    .limit(limit);
+  return data ?? [];
+}
+
 export async function perConsultantActivity(supa: SupabaseClient, range: Range) {
   const since = rangeStart(range);
   const sinceIso = since?.toISOString();

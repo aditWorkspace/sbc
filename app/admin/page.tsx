@@ -1,5 +1,5 @@
 import { supabaseService } from '@/lib/supabase/service';
-import { overviewKpis, perConsultantActivity, type Range } from '@/lib/admin/queries';
+import { overviewKpis, perConsultantActivity, queueSnapshot, recentActivity, type Range } from '@/lib/admin/queries';
 import { KpiCard } from '@/components/kpi-card';
 import { TimeRangeToggle } from '@/components/time-range-toggle';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -12,8 +12,12 @@ export const dynamic = 'force-dynamic';
 export default async function AdminOverview({ searchParams }: { searchParams: { range?: string } }) {
   const range = (['day','week','month','all'].includes(searchParams.range ?? '') ? searchParams.range : 'month') as Range;
   const supa = supabaseService();
-  const kpis = await overviewKpis(supa, range);
-  const consultants = await perConsultantActivity(supa, range);
+  const [kpis, consultants, queue, recent] = await Promise.all([
+    overviewKpis(supa, range),
+    perConsultantActivity(supa, range),
+    queueSnapshot(supa),
+    recentActivity(supa, 10),
+  ]);
 
   return (
     <div className="space-y-6">
@@ -22,11 +26,12 @@ export default async function AdminOverview({ searchParams }: { searchParams: { 
         <TimeRangeToggle current={range} />
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <KpiCard label="Active pool" value={kpis.pool.toLocaleString()} sub="rows available" />
         <KpiCard label={`Uploaded (${range})`} value={kpis.uploadedRows.toLocaleString()} />
         <KpiCard label={`Sheets (${range})`} value={String(kpis.sheetCount)} sub={`${kpis.sheetRows.toLocaleString()} rows out`} />
         <KpiCard label={`Apollo credits (${range})`} value={String(kpis.credits)} sub="1 credit ≈ 1 email" />
+        <KpiCard label="Queue" value={`${queue.queued + queue.running}`} sub={`${queue.pendingContacts} pending rows`} />
       </div>
 
       <Card>
@@ -87,6 +92,38 @@ export default async function AdminOverview({ searchParams }: { searchParams: { 
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader><CardTitle>Recent enrichment activity</CardTitle></CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader><TableRow>
+              <TableHead>When</TableHead>
+              <TableHead>Person</TableHead>
+              <TableHead>Result</TableHead>
+              <TableHead>Pattern</TableHead>
+            </TableRow></TableHeader>
+            <TableBody>
+              {recent.map((s, i) => (
+                <TableRow key={i}>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {new Date(s.sampled_at).toLocaleTimeString()}
+                  </TableCell>
+                  <TableCell>{s.person_first_name} {s.person_last_name}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {s.email_returned ?? <span className="text-muted-foreground">no email</span>}
+                    {s.email_ignored_reason && <Badge variant="outline" className="ml-2">{s.email_ignored_reason}</Badge>}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">{s.detected_pattern ?? '—'}</TableCell>
+                </TableRow>
+              ))}
+              {recent.length === 0 && (
+                <TableRow><TableCell colSpan={4} className="text-center text-muted-foreground">No enrichment activity yet.</TableCell></TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
     </div>
   );
 }
