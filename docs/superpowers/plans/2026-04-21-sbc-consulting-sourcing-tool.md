@@ -1624,7 +1624,7 @@ export function oauthClient(refreshToken: string) {
   const client = new google.auth.OAuth2(
     env().GOOGLE_OAUTH_CLIENT_ID,
     env().GOOGLE_OAUTH_CLIENT_SECRET,
-    'http://localhost:3333/oauth/callback'
+    'http://localhost:3010/oauth/callback'
   );
   client.setCredentials({ refresh_token: refreshToken });
   return client;
@@ -1701,7 +1701,7 @@ export function retryWithBackoff<T>(fn: () => Promise<T>, attempts = 3): Promise
 
 ```ts
 // Run once, locally: `pnpm exec tsx scripts/setup-admin-oauth.ts`
-// Starts localhost:3333, opens browser to Google consent screen, captures the
+// Starts localhost:3010, opens browser to Google consent screen, captures the
 // refresh token, and stores it in Supabase Vault.
 import { google } from 'googleapis';
 import http from 'node:http';
@@ -1713,7 +1713,7 @@ async function main() {
   const client = new google.auth.OAuth2(
     env().GOOGLE_OAUTH_CLIENT_ID,
     env().GOOGLE_OAUTH_CLIENT_SECRET,
-    'http://localhost:3333/oauth/callback'
+    'http://localhost:3010/oauth/callback'
   );
   const url = client.generateAuthUrl({
     access_type: 'offline',
@@ -1727,7 +1727,7 @@ async function main() {
   await open(url);
   const code = await new Promise<string>((resolve) => {
     const srv = http.createServer(async (req, res) => {
-      const u = new URL(req.url!, 'http://localhost:3333');
+      const u = new URL(req.url!, 'http://localhost:3010');
       const c = u.searchParams.get('code');
       if (c) {
         res.end('Thanks — you can close this tab.');
