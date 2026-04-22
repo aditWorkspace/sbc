@@ -33,3 +33,17 @@ export async function requireAdmin(): Promise<AuthOutcome> {
   if (!r.consultant.is_admin) return { error: 'forbidden' };
   return { consultant: r.consultant };
 }
+
+export async function requireOwner(): Promise<AuthOutcome> {
+  const r = await requireApprovedConsultant();
+  if ('error' in r) return r;
+  if (r.consultant.role !== 'owner') return { error: 'forbidden' };
+  return { consultant: r.consultant };
+}
+
+export async function requireCanPullSheet(): Promise<AuthOutcome> {
+  const r = await requireApprovedConsultant();
+  if ('error' in r) return r;
+  if (r.consultant.role === 'jr_consultant') return { error: 'forbidden' };
+  return { consultant: r.consultant };
+}
