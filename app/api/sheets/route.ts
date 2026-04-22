@@ -80,7 +80,9 @@ export async function POST() {
         ? `Only ${rowArr.length} rows available (pool running low).`
         : null,
     });
-  } catch {
+  } catch (err) {
+    // Log the actual Google error so we can debug falsely-triggered CSV fallbacks.
+    console.error('[api/sheets] Google Sheets creation failed, falling back to CSV:', err);
     await supa.from('sheets').update({ status: 'fallback_csv' }).eq('id', sheetDbId);
     return fallbackCsv(rowArr);
   }

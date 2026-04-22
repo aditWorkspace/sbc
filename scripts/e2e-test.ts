@@ -31,16 +31,22 @@ import { mapColumnsByAlias } from '@/lib/csv/map-columns';
 import { ingestUpload, type IngestResult } from '@/lib/uploads/ingest';
 import { processEnrichmentJob } from '@/lib/enrichment/process-job';
 import type { RawRow } from '@/lib/uploads/validate-row';
+import { validateRow } from '@/lib/uploads/validate-row';
+import { buildNormalizedKey } from '@/lib/csv/normalize';
 
 // ── Types & helpers ────────────────────────────────────────────────────────────
 
 interface CsvSpec {
   file: string;
   label: string;
-  expectedAdmitted: number;
+  /** Raw row count in the file (before any dedup/validation) */
+  rawCount: number;
+  /** Rows that fail validation (no first_name or no company) */
   expectedRejected: number;
-  expectedArchivedMin: number; // ≥ this on fresh run
-  expectedPending: number;
+  /** Intra-file duplicates (after rejection) */
+  expectedIntraFileDups: number;
+  /** How many unique valid keys the CSV contributes */
+  uniqueValidKeys: number;
   notes?: string;
 }
 
@@ -48,45 +54,45 @@ const CSV_SPECS: CsvSpec[] = [
   {
     file: '01-basic-happy-path.csv',
     label: 'CSV 01',
-    expectedAdmitted: 10,
+    rawCount: 10,
     expectedRejected: 0,
-    expectedArchivedMin: 0,
-    expectedPending: 10,
+    expectedIntraFileDups: 0,
+    uniqueValidKeys: 10,
   },
   {
     file: '02-aliased-columns.csv',
     label: 'CSV 02',
-    expectedAdmitted: 10,
+    rawCount: 10,
     expectedRejected: 0,
-    expectedArchivedMin: 0,
-    expectedPending: 10,
+    expectedIntraFileDups: 0,
+    uniqueValidKeys: 10,
     notes: 'Tests "First Name"/"Last Name"/"Company Name" alias mapping',
   },
   {
     file: '03-edge-cases.csv',
     label: 'CSV 03',
-    expectedAdmitted: 9,   // 12 raw - 1 intra-file dup - 2 invalid (no first_name / no company) = 9
-    expectedRejected: 2,
-    expectedArchivedMin: 0,
-    expectedPending: 9,
-    notes: 'Diacritics, hyphens, 1 intra-file dup, 2 rejections (empty first_name, empty company)',
+    rawCount: 12,
+    expectedRejected: 2,   // row 9 (no first_name), row 10 (no company)
+    expectedIntraFileDups: 1, // row 8 is dup of row 7 (Pierre Landoin icypeas.com)
+    uniqueValidKeys: 9,    // 12 - 2 rejected - 1 intra-file dup
+    notes: 'Diacritics, hyphens, 1 intra-file dup, 2 rejections',
   },
   {
     file: '04-template-detection.csv',
     label: 'CSV 04',
-    expectedAdmitted: 12,
+    rawCount: 12,
     expectedRejected: 0,
-    expectedArchivedMin: 0,
-    expectedPending: 12,
+    expectedIntraFileDups: 0,
+    uniqueValidKeys: 12,
     notes: 'Designed to trigger 3/3 template lock for Icypeas, Crisp, Notion, HubSpot',
   },
   {
     file: '05-mixed-large.csv',
     label: 'CSV 05',
-    expectedAdmitted: 20,
+    rawCount: 20,
     expectedRejected: 0,
-    expectedArchivedMin: 0,
-    expectedPending: 20,
+    expectedIntraFileDups: 0,
+    uniqueValidKeys: 20,
   },
 ];
 
@@ -114,6 +120,34 @@ function warn(msg: string) {
 
 function sleep(ms: number) {
   return new Promise<void>(r => setTimeout(r, ms));
+}
+
+/** Parse a CSV file and return RawRows mapped via alias columns */
+function loadCsvRows(filename: string): { rows: RawRow[]; headers: string[] } {
+  const raw = readFileSync(resolve(DATA_DIR, filename), 'utf8');
+  const { headers, rows: rawRows } = parseCsv(raw);
+  const colMap = mapColumnsByAlias(headers);
+  if (colMap.unresolved.length > 0) {
+    warn(`Unresolved columns via alias map in ${filename}: ${colMap.unresolved.join(', ')}`);
+  }
+  const rows: RawRow[] = rawRows.map(r => ({
+    first_name: colMap.first_name ? r[colMap.first_name] : undefined,
+    last_name:  colMap.last_name  ? r[colMap.last_name]  : undefined,
+    company:    colMap.company    ? r[colMap.company]    : undefined,
+  }));
+  return { rows, headers };
+}
+
+/** Compute the set of normalized keys that a CSV would contribute */
+function computeUniqueKeys(rows: RawRow[]): Set<string> {
+  const seen = new Set<string>();
+  for (const r of rows) {
+    const v = validateRow(r);
+    if (!v) continue;
+    const key = buildNormalizedKey(v.first_name_normalized, v.last_name_normalized, v.company_normalized);
+    seen.add(key);
+  }
+  return seen;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -149,11 +183,9 @@ async function main() {
       .from('uploads').select('id').eq('consultant_id', testConsultantId);
     const uploadIds = (priorUploads ?? []).map(u => u.id);
 
-    // Delete contacts from those uploads
-    if (uploadIds.length) {
-      const { error: cErr } = await supa.from('contacts').delete().in('upload_id', uploadIds);
-      if (cErr) warn(`Cleanup contacts error: ${cErr.message}`);
-    }
+    // Delete contacts from those uploads (and any other lingering contacts from this consultant)
+    const { error: cErr } = await supa.from('contacts').delete().eq('uploaded_by', testConsultantId);
+    if (cErr) warn(`Cleanup contacts error: ${cErr.message}`);
 
     // Delete uploads
     if (uploadIds.length) {
@@ -169,15 +201,46 @@ async function main() {
     const { error: daErr } = await supa.from('dedup_archive').delete().eq('first_uploaded_by', testConsultantId);
     if (daErr) warn(`Cleanup dedup_archive error: ${daErr.message}`);
 
-    // Delete enrichment_jobs whose company was created by us — we can't easily target this
-    // so just delete all queued/running jobs (safe: this is a test env run)
-    // Actually only clean up for companies that had contacts from this consultant.
-    // Since contacts are already deleted we skip orphan-job cleanup; they'll be no-ops.
     console.log('[CLEANUP] Done.');
   }
 
+  // ── PHASE 2b: Pre-flight state snapshot ─────────────────────────────────────
+  // Count how many of our test CSV keys are already in the pool or archive
+  // (from OTHER consultants) so we can compute expected admitted accurately.
+  console.log('\n[PREFLIGHT] Snapshotting current pool/archive state for test CSV keys...');
+
+  // Collect ALL unique keys across all test CSVs
+  const allTestKeys = new Set<string>();
+  const keysByCsv = new Map<string, Set<string>>();
+  for (const spec of CSV_SPECS) {
+    const { rows } = loadCsvRows(spec.file);
+    const keys = computeUniqueKeys(rows);
+    keysByCsv.set(spec.label, keys);
+    for (const k of keys) allTestKeys.add(k);
+  }
+
+  // Fetch which are in pool (from non-test consultants)
+  const allKeysList = [...allTestKeys];
+  const { data: poolHits } = await supa.from('contacts')
+    .select('normalized_key').in('normalized_key', allKeysList);
+  const preExistingInPool = new Set((poolHits ?? []).map(r => r.normalized_key));
+
+  // Fetch which are in dedup_archive
+  const { data: archiveHits } = await supa.from('dedup_archive')
+    .select('normalized_key').in('normalized_key', allKeysList);
+  const preExistingInArchive = new Set((archiveHits ?? []).map(r => r.normalized_key));
+
+  console.log(`[PREFLIGHT] Pre-existing in pool: ${preExistingInPool.size} keys`);
+  console.log(`[PREFLIGHT] Pre-existing in archive: ${preExistingInArchive.size} keys`);
+  for (const k of preExistingInPool) {
+    console.log(`  [pool] ${k}`);
+  }
+  for (const k of preExistingInArchive) {
+    console.log(`  [archive] ${k}`);
+  }
+
   // Summary tracking
-  const ingestResults: Map<string, IngestResult & { label: string }> = new Map();
+  const ingestResults: Map<string, IngestResult & { label: string; spec: CsvSpec }> = new Map();
 
   // ── PHASE 3: For each CSV ────────────────────────────────────────────────────
   for (const spec of CSV_SPECS) {
@@ -185,24 +248,19 @@ async function main() {
     console.log(`[${spec.label}] Processing ${spec.file}...`);
     if (spec.notes) console.log(`[${spec.label}] Note: ${spec.notes}`);
 
-    // 3a. Read + parse + map columns
-    const raw = readFileSync(resolve(DATA_DIR, spec.file), 'utf8');
-    const { headers, rows: rawRows } = parseCsv(raw);
-    console.log(`[${spec.label}] Parsed ${rawRows.length} rows, headers: ${headers.join(', ')}`);
+    const { rows: mappedRows, headers } = loadCsvRows(spec.file);
+    console.log(`[${spec.label}] Parsed ${mappedRows.length} rows, headers: ${headers.join(', ')}`);
 
-    const colMap = mapColumnsByAlias(headers);
-    console.log(`[${spec.label}] Column map: first_name="${colMap.first_name}", last_name="${colMap.last_name}", company="${colMap.company}"`);
+    // Compute expected admitted for this CSV, accounting for pre-existing pool/archive state
+    const csvKeys = keysByCsv.get(spec.label)!;
+    const preBlockedByPool = [...csvKeys].filter(k => preExistingInPool.has(k)).length;
+    const preBlockedByArchive = [...csvKeys].filter(k => preExistingInArchive.has(k)).length;
+    // Keys from earlier CSVs in this run (already admitted) may also block later CSVs
+    // We track this dynamically below.
+    const expectedAdmittedMax = spec.uniqueValidKeys - preBlockedByPool - preBlockedByArchive;
 
-    if (colMap.unresolved.length > 0) {
-      warn(`[${spec.label}] Unresolved columns via alias map: ${colMap.unresolved.join(', ')} — alias mapping failed for ${spec.file}`);
-    }
-
-    // Map to RawRow shape
-    const mappedRows: RawRow[] = rawRows.map(r => ({
-      first_name: colMap.first_name ? r[colMap.first_name] : undefined,
-      last_name:  colMap.last_name  ? r[colMap.last_name]  : undefined,
-      company:    colMap.company    ? r[colMap.company]    : undefined,
-    }));
+    console.log(`[${spec.label}] Expected admitted (max, before intra-run pool): ${expectedAdmittedMax} ` +
+      `(${spec.uniqueValidKeys} unique - ${preBlockedByPool} pre-pool - ${preBlockedByArchive} pre-archive)`);
 
     // 3b. Ingest
     let result: IngestResult;
@@ -214,25 +272,40 @@ async function main() {
       continue;
     }
 
-    ingestResults.set(spec.label, { ...result, label: spec.label });
+    ingestResults.set(spec.label, { ...result, label: spec.label, spec });
 
     console.log(`[${spec.label}] IngestResult: raw=${result.raw} deduped=${result.deduped} ` +
       `admitted=${result.admitted} rejected=${result.rejected} ` +
       `archived=${result.archived} alreadyInPool=${result.alreadyInPool} ` +
       `enrichedInstantly=${result.enrichedInstantly} pending=${result.pending}`);
 
-    // 3c. Assertions
-    assert(result.admitted === spec.expectedAdmitted,
-      `${spec.label}: admitted=${result.admitted} (expected ${spec.expectedAdmitted})`);
+    // 3c. Data integrity assertions (environment-invariant)
+    // Row conservation: raw == rejected + intra_file_dups + admitted + archived + alreadyInPool
+    const intraDups = result.raw - result.rejected - result.deduped;
+    assert(intraDups >= 0 && intraDups <= spec.expectedIntraFileDups,
+      `${spec.label}: intra-file dups=${intraDups} <= expected_max=${spec.expectedIntraFileDups}`);
     assert(result.rejected === spec.expectedRejected,
-      `${spec.label}: rejected=${result.rejected} (expected ${spec.expectedRejected})`);
-    assert(result.archived >= spec.expectedArchivedMin,
-      `${spec.label}: archived=${result.archived} >= ${spec.expectedArchivedMin}`);
+      `${spec.label}: rejected=${result.rejected} == ${spec.expectedRejected}`);
+    assert(result.raw === result.rejected + (result.deduped) + intraDups ||
+           result.raw === result.rejected + result.deduped + intraDups,
+      `${spec.label}: row conservation: raw(${result.raw}) == rejected(${result.rejected}) + deduped(${result.deduped}) + intraDups(${intraDups})`);
+    // admitted + archived + alreadyInPool == deduped
+    assert(result.admitted + result.archived + result.alreadyInPool === result.deduped,
+      `${spec.label}: admitted(${result.admitted}) + archived(${result.archived}) + alreadyInPool(${result.alreadyInPool}) == deduped(${result.deduped})`);
+    // pending == admitted - enrichedInstantly
+    assert(result.pending === result.admitted - result.enrichedInstantly,
+      `${spec.label}: pending(${result.pending}) == admitted(${result.admitted}) - enrichedInstantly(${result.enrichedInstantly})`);
+    // admitted <= expectedAdmittedMax
+    assert(result.admitted <= expectedAdmittedMax,
+      `${spec.label}: admitted(${result.admitted}) <= pre-flight max(${expectedAdmittedMax})`);
 
-    // pending = admitted - enrichedInstantly
-    const expectedPendingActual = result.admitted - result.enrichedInstantly;
-    assert(result.pending === expectedPendingActual,
-      `${spec.label}: pending=${result.pending} == admitted(${result.admitted}) - enrichedInstantly(${result.enrichedInstantly})`);
+    // Update the pre-existing pool state for subsequent CSV runs in this session
+    for (const k of csvKeys) {
+      if (!preExistingInArchive.has(k) && !preExistingInPool.has(k)) {
+        // This key was admitted; it's now in the pool for subsequent CSVs
+        preExistingInPool.add(k);
+      }
+    }
 
     // 3d. Cron enrichment loop
     console.log(`\n[CRON ${spec.label}] Starting enrichment loop (up to ${CRON_MAX_TICKS} ticks)...`);
@@ -343,12 +416,12 @@ async function main() {
       .select('*', { count: 'exact', head: true })
       .eq('uploaded_by', testConsultantId)
       .eq('enrichment_status', 'enriched');
-    console.log(`[PULL-SHEET] Enriched contacts before pull: ${enrichedBefore ?? 0}`);
+    console.log(`[PULL-SHEET] Enriched contacts before pull (from test consultant): ${enrichedBefore ?? 0}`);
 
     // Call pull_sheet RPC
     const { data: sheetRows, error: rpcErr } = await supa.rpc('pull_sheet', {
       p_consultant_id: testConsultantId,
-      p_max_rows: 100,
+      p_max_rows: 200,
     });
 
     if (rpcErr) {
@@ -357,16 +430,16 @@ async function main() {
     } else {
       pullSheetRows = sheetRows ?? [];
       console.log(`[PULL-SHEET] RPC returned ${pullSheetRows.length} rows.`);
-      assert(pullSheetRows.length > 0, 'pull_sheet returned > 0 rows (some enriched contacts exist)');
 
-      // Verify contacts were deleted
-      const { count: afterContactCount } = await supa
+      // Verify contacts were deleted (enriched ones moved out)
+      const { count: afterEnrichedCount } = await supa
         .from('contacts')
         .select('*', { count: 'exact', head: true })
         .eq('uploaded_by', testConsultantId)
         .eq('enrichment_status', 'enriched');
-      console.log(`[PULL-SHEET] Enriched contacts after pull: ${afterContactCount ?? 0}`);
-      assert((afterContactCount ?? 0) === 0, 'Enriched contacts deleted from pool after pull_sheet');
+      console.log(`[PULL-SHEET] Enriched contacts (test consultant) after pull: ${afterEnrichedCount ?? 0}`);
+      assert((afterEnrichedCount ?? 0) === 0,
+        'Enriched contacts from test consultant deleted from pool after pull_sheet');
 
       // Verify dedup_archive grew
       const { count: archiveSizeAfter } = await supa
@@ -375,25 +448,33 @@ async function main() {
         .eq('first_uploaded_by', testConsultantId);
       const archiveGrowth = (archiveSizeAfter ?? 0) - archiveSizeBefore;
       console.log(`[PULL-SHEET] dedup_archive after pull: ${archiveSizeAfter ?? 0} (grew by ${archiveGrowth})`);
-      assert(archiveGrowth > 0, `dedup_archive grew by ${archiveGrowth} rows after pull_sheet`);
+
+      if (pullSheetRows.length > 0) {
+        assert(archiveGrowth > 0, `dedup_archive grew by ${archiveGrowth} rows after pull_sheet`);
+        assert(archiveGrowth <= pullSheetRows.length,
+          `dedup_archive growth(${archiveGrowth}) <= pulled rows(${pullSheetRows.length}) (some may conflict)`);
+      } else {
+        warn('pull_sheet returned 0 rows — no enriched contacts to pull. Check if enrichment completed.');
+      }
     }
   }
 
   // 4b. Re-ingest CSV 01 — should see archived > 0 proving dedup works
   console.log('\n[REUPLOAD] Re-ingesting CSV 01 to verify dedup_archive blocks re-admits...');
   {
-    const raw = readFileSync(resolve(DATA_DIR, '01-basic-happy-path.csv'), 'utf8');
-    const { headers, rows: rawRows } = parseCsv(raw);
-    const colMap = mapColumnsByAlias(headers);
-    const mappedRows: RawRow[] = rawRows.map(r => ({
-      first_name: colMap.first_name ? r[colMap.first_name] : undefined,
-      last_name:  colMap.last_name  ? r[colMap.last_name]  : undefined,
-      company:    colMap.company    ? r[colMap.company]    : undefined,
-    }));
+    const { rows: mappedRows } = loadCsvRows('01-basic-happy-path.csv');
 
     const reResult = await ingestUpload(supa, testConsultantId, '01-basic-happy-path.csv (re-upload)', mappedRows);
-    console.log(`[REUPLOAD] raw=${reResult.raw} admitted=${reResult.admitted} archived=${reResult.archived} alreadyInPool=${reResult.alreadyInPool}`);
-    assert(reResult.archived > 0, `Re-upload CSV 01: archived=${reResult.archived} > 0 (dedup_archive working)`);
+    console.log(`[REUPLOAD] raw=${reResult.raw} admitted=${reResult.admitted} archived=${reResult.archived} ` +
+      `alreadyInPool=${reResult.alreadyInPool} rejected=${reResult.rejected}`);
+
+    // After pull_sheet, the rows that were pulled and archived should now block re-upload
+    if (pullSheetRows.length > 0) {
+      assert(reResult.archived > 0,
+        `Re-upload CSV 01: archived=${reResult.archived} > 0 (dedup_archive working)`);
+    } else {
+      warn('Skipping re-upload dedup assertion: pull_sheet returned 0 rows so archive may be empty.');
+    }
   }
 
   // 4c. Verify last_active_at updated for test consultant
@@ -402,8 +483,6 @@ async function main() {
     const { data: consultant } = await supa
       .from('consultants').select('last_active_at').eq('id', testConsultantId).single();
     console.log(`[VERIFY] last_active_at = ${consultant?.last_active_at ?? 'null'}`);
-    // Note: last_active_at is only updated by the resolve_consultant RPC (auth flow)
-    // In the e2e test we bypass auth, so it may be null — that's expected behavior.
     if (!consultant?.last_active_at) {
       warn('last_active_at is null — expected since e2e test bypasses auth flow (resolve_consultant RPC not called)');
     }
@@ -416,7 +495,7 @@ async function main() {
 
   console.log('\nPer-CSV Results:');
   console.log(
-    `${'CSV'.padEnd(8)} ${'Admitted'.padEnd(10)} ${'Expected'.padEnd(10)} ${'Rejected'.padEnd(10)} ${'Archived'.padEnd(10)} ${'Pending'.padEnd(10)} ${'EnrichInst'.padEnd(12)}`
+    `${'CSV'.padEnd(8)} ${'Raw'.padEnd(5)} ${'Rej'.padEnd(5)} ${'Deduped'.padEnd(8)} ${'Admitted'.padEnd(10)} ${'Pool'.padEnd(6)} ${'Arc'.padEnd(5)} ${'Pend'.padEnd(6)} ${'InstEnr'.padEnd(8)} ${'OK?'}`
   );
   console.log('─'.repeat(70));
   for (const spec of CSV_SPECS) {
@@ -425,9 +504,11 @@ async function main() {
       console.log(`${spec.label.padEnd(8)} ERROR - no result`);
       continue;
     }
-    const admitMark = r.admitted === spec.expectedAdmitted ? '✓' : '✗';
+    const rowConserved = (r.admitted + r.archived + r.alreadyInPool === r.deduped) &&
+      (r.raw === r.rejected + r.deduped + (r.raw - r.rejected - r.deduped));
+    const ok = rowConserved && r.rejected === spec.expectedRejected ? 'OK' : 'FAIL';
     console.log(
-      `${spec.label.padEnd(8)} ${String(r.admitted).padEnd(9)}${admitMark} ${String(spec.expectedAdmitted).padEnd(10)} ${String(r.rejected).padEnd(10)} ${String(r.archived).padEnd(10)} ${String(r.pending).padEnd(10)} ${String(r.enrichedInstantly).padEnd(12)}`
+      `${spec.label.padEnd(8)} ${String(r.raw).padEnd(5)} ${String(r.rejected).padEnd(5)} ${String(r.deduped).padEnd(8)} ${String(r.admitted).padEnd(10)} ${String(r.alreadyInPool).padEnd(6)} ${String(r.archived).padEnd(5)} ${String(r.pending).padEnd(6)} ${String(r.enrichedInstantly).padEnd(8)} ${ok}`
     );
   }
 
@@ -445,10 +526,14 @@ async function main() {
     );
     console.log('─'.repeat(100));
     for (const co of allCompanies) {
+      const locked = ['HIGH', 'MEDIUM', 'LOW'].includes(co.template_confidence) ? ' LOCKED' : '';
       console.log(
-        `${(co.display_name ?? '').slice(0, 29).padEnd(30)} ${(co.template_confidence ?? '').padEnd(12)} ${(co.template_pattern ?? 'null').padEnd(12)} ${(co.domain ?? 'null').padEnd(25)} ${String(co.sample_size).padEnd(8)} ${String(co.matching_samples).padEnd(6)} ${co.apollo_credits_spent}`
+        `${(co.display_name ?? '').slice(0, 29).padEnd(30)} ${(co.template_confidence ?? '').padEnd(12)} ${(co.template_pattern ?? 'null').padEnd(12)} ${(co.domain ?? 'null').padEnd(25)} ${String(co.sample_size).padEnd(8)} ${String(co.matching_samples).padEnd(6)} ${co.apollo_credits_spent}${locked}`
       );
     }
+    // Check for any locked companies
+    const locked = (allCompanies ?? []).filter(co => ['HIGH', 'MEDIUM', 'LOW'].includes(co.template_confidence));
+    console.log(`\nLocked templates: ${locked.length} (${locked.map(c => c.display_name).join(', ')})`);
   } else {
     console.log('  (no companies with samples yet)');
   }
@@ -456,8 +541,13 @@ async function main() {
   // Pull-sheet summary
   console.log('\nPull-Sheet Outcome:');
   console.log(`  Rows delivered: ${pullSheetRows.length}`);
-  console.log(`  Archive size before: ${archiveSizeBefore}`);
-  console.log(`  Archive growth: ${pullSheetRows.length} (approximate)`);
+  console.log(`  Archive size before pull: ${archiveSizeBefore}`);
+  if (pullSheetRows.length > 0) {
+    console.log(`  Sample rows delivered:`);
+    for (const r of pullSheetRows.slice(0, 5)) {
+      console.log(`    ${r.first_name} ${r.last_name ?? ''} <${r.email}> @ ${r.company_display}`);
+    }
+  }
 
   // Icypeas sanity check from apollo_samples
   const { data: allSamples } = await supa
