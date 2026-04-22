@@ -1,12 +1,13 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { validateRow, type RawRow } from './validate-row';
 import { findOrCreateCompany } from '@/lib/companies/canon';
-import { buildNormalizedKey } from '@/lib/csv/normalize';
+import { buildNormalizedKey, normalize } from '@/lib/csv/normalize';
 import { renderTemplate, type Pattern } from '@/lib/apollo/patterns';
 
 export interface IngestResult {
   uploadId: string;
-  raw: number; deduped: number; alreadyInPool: number; archived: number; rejected: number; admitted: number;
+  raw: number; deduped: number; alreadyInPool: number; archived: number; previouslyAttempted: number;
+  rejected: number; admitted: number;
   enrichedInstantly: number; pending: number;
 }
 
@@ -57,17 +58,48 @@ export async function ingestUpload(
       .in('normalized_key', afterArchive.map(v => v.normalized_key));
     poolKeys = new Set((inPool ?? []).map(r => r.normalized_key));
   }
-  const admitted = afterArchive.filter(v => !poolKeys.has(v.normalized_key));
-  const alreadyInPool = afterArchive.length - admitted.length;
+  const afterPool = afterArchive.filter(v => !poolKeys.has(v.normalized_key));
+  const alreadyInPool = afterArchive.length - afterPool.length;
 
-  // Company canonicalization (one DB round-trip per unique company)
+  // Company canonicalization (need company_id before Stage D, which checks apollo_samples per company)
   const companyMap = new Map<string, string>();
-  for (const v of admitted) {
+  for (const v of afterPool) {
     if (!companyMap.has(v!.company_normalized)) {
       const id = await findOrCreateCompany(supa, v!.company_display, v!.company_normalized);
       companyMap.set(v!.company_normalized, id);
     }
   }
+
+  // Stage D: apollo_samples dedup — if we already called Icypeas on this exact
+  // (normalized first, normalized last, company_id) tuple (whether it succeeded,
+  // failed, was ignored as guessed/personal_domain, etc.), skip — we already spent
+  // the credit. This prevents re-burning credits when the same CSV is re-uploaded
+  // or when a name was previously deleted due to low certainty.
+  const perCompanyKeys = new Map<string, Set<string>>();
+  for (const v of afterPool) {
+    const cid = companyMap.get(v!.company_normalized)!;
+    if (!perCompanyKeys.has(cid)) perCompanyKeys.set(cid, new Set());
+    perCompanyKeys.get(cid)!.add(`${v!.first_name_normalized}|${v!.last_name_normalized}`);
+  }
+  const attemptedKeys = new Set<string>();  // `${company_id}|${fn_norm}|${ln_norm}`
+  for (const [cid, nameKeys] of perCompanyKeys) {
+    const { data: attempts } = await supa
+      .from('apollo_samples')
+      .select('person_first_name, person_last_name')
+      .eq('company_id', cid);
+    for (const a of (attempts ?? [])) {
+      const fn = normalize((a as { person_first_name: string | null }).person_first_name ?? '');
+      const ln = normalize((a as { person_last_name: string | null }).person_last_name ?? '');
+      if (nameKeys.has(`${fn}|${ln}`)) {
+        attemptedKeys.add(`${cid}|${fn}|${ln}`);
+      }
+    }
+  }
+  const admitted = afterPool.filter(v => {
+    const cid = companyMap.get(v!.company_normalized)!;
+    return !attemptedKeys.has(`${cid}|${v!.first_name_normalized}|${v!.last_name_normalized}`);
+  });
+  const previouslyAttempted = afterPool.length - admitted.length;
 
   // Pre-fetch templates for all companies touched by this upload
   const companyIds = [...new Set(companyMap.values())];
@@ -133,6 +165,7 @@ export async function ingestUpload(
     row_count_deduped: deduped,
     row_count_archived: archivedCount,
     row_count_already_in_pool: alreadyInPool,
+    row_count_previously_attempted: previouslyAttempted,
     row_count_rejected: rejected,
     row_count_admitted: admitted.length,
     status: 'complete',
@@ -145,6 +178,7 @@ export async function ingestUpload(
     deduped,
     alreadyInPool,
     archived: archivedCount,
+    previouslyAttempted,
     rejected,
     admitted: admitted.length,
     enrichedInstantly,

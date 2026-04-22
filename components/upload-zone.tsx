@@ -9,7 +9,7 @@ type Stage = 'idle' | 'reading' | 'parsing' | 'uploading' | 'processing' | 'done
 interface Summary {
   uploadId: string;
   raw: number; admitted: number; enrichedInstantly: number; pending: number;
-  archived: number; alreadyInPool: number; rejected: number;
+  archived: number; alreadyInPool: number; previouslyAttempted: number; rejected: number;
 }
 
 const STAGE_LABEL: Record<Stage, string> = {
@@ -135,6 +135,7 @@ export function UploadZone() {
             <span>Rejected (bad data): <span className="text-foreground font-medium">{summary.rejected}</span></span>
             <span>Already in pool: <span className="text-foreground font-medium">{summary.alreadyInPool}</span></span>
             <span>Previously emailed: <span className="text-foreground font-medium">{summary.archived}</span></span>
+            <span>Previously attempted (credit saved): <span className="text-foreground font-medium">{summary.previouslyAttempted ?? 0}</span></span>
             <span>Enriched instantly: <span className="text-foreground font-medium">{summary.enrichedInstantly}</span></span>
           </div>
 
