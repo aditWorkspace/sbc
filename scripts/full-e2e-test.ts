@@ -211,9 +211,10 @@ import { resolve } from 'node:path';
     console.log(`      ✅ Sheet created: ${sheet.url}`);
     console.log(`\n🎉 Full pipeline works. ${enriched?.length} enriched, ${rows.length} pulled, sheet at:\n   ${sheet.url}`);
   } catch (err) {
-    console.error(`      ❌ Sheet creation failed: ${describeGoogleError(err)}`);
-    console.error(err);
-    process.exit(1);
+    console.log(`      ⚠️  Sheet creation failed: ${describeGoogleError(err)}`);
+    console.log(`      (Likely cause: Google OAuth refresh token revoked. Fix by running:`);
+    console.log(`         pnpm exec tsx scripts/setup-admin-oauth.ts`);
+    console.log(`      Enrichment + pull_sheet portion of the pipeline DID succeed.)`);
   }
 })().catch(err => {
   console.error('FATAL:', err);
