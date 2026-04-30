@@ -38,6 +38,7 @@ export async function GET(req: Request) {
     const log: any[] = [];
     const submit = await fetch('https://app.icypeas.com/api/email-search', {
       method: 'POST',
+      cache: 'no-store',
       headers: { 'Authorization': env().ICYPEAS_API_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({ firstname: 'Sundar', lastname: 'Pichai', domainOrCompany: 'google.com' }),
     });
@@ -52,6 +53,7 @@ export async function GET(req: Request) {
       await new Promise(r => setTimeout(r, 5000));
       const read = await fetch('https://app.icypeas.com/api/bulk-single-searchs/read', {
         method: 'POST',
+        cache: 'no-store',
         headers: { 'Authorization': env().ICYPEAS_API_KEY, 'Content-Type': 'application/json' },
         body: JSON.stringify({ id }),
       });

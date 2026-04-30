@@ -42,6 +42,7 @@ function certaintyToStatus(c: string | undefined): 'verified' | 'guessed' {
 async function submitSingle(detail: BulkMatchDetail): Promise<string> {
   const res = await fetch(`${BASE}/email-search`, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       'Authorization': env().ICYPEAS_API_KEY,
       'Content-Type': 'application/json',
@@ -87,6 +88,7 @@ interface IcypeasReadResponse {
 async function readItem(id: string): Promise<IcypeasResultItem | null> {
   const res = await fetch(`${BASE}/bulk-single-searchs/read`, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       'Authorization': env().ICYPEAS_API_KEY,
       'Content-Type': 'application/json',
