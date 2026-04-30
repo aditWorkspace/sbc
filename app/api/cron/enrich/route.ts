@@ -77,7 +77,16 @@ async function drainQueue(supa: ReturnType<typeof supabaseService>): Promise<voi
 // Find companies with pending contacts but no queued/running job, and insert one.
 // Bounded to 100 per tick to keep this cheap.
 async function selfHealOrphanedCompanies(supa: ReturnType<typeof supabaseService>): Promise<number> {
-  // Distinct company_ids of pending contacts
+  // Step 1: rescue stale 'running' jobs. A job locked >10 min ago indicates the
+  // worker died mid-process (Vercel function killed, network blip, deploy roll).
+  // Without this, the unique partial index keeps the job locked forever and the
+  // company's pending contacts can never get re-queued.
+  const staleCutoff = new Date(Date.now() - 10 * 60_000).toISOString();
+  await supa.from('enrichment_jobs').update({
+    status: 'queued', locked_at: null, last_error: 'stale_running_recovered',
+  }).eq('status', 'running').lt('locked_at', staleCutoff);
+
+  // Step 2: any company with pending contacts but no queued/running job gets one.
   const { data: pendingCompanies } = await supa
     .from('contacts')
     .select('company_id')

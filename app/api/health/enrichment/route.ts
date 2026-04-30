@@ -26,11 +26,17 @@ export async function GET() {
   const oldestQueuedJobAgeS = ageSec(oldestQueuedJob.data?.created_at);
   const oldestPendingContactAgeS = ageSec(oldestPendingContact.data?.created_at);
 
-  // Heuristic: if the cron is running every minute and processing, no queued job
-  // should be older than ~5 minutes under normal load. Anything older = probably stuck.
+  // "draining" means: either there's no work to do, or work IS happening.
+  //   - no pending contacts             → nothing to drain, healthy
+  //   - any running job                 → worker is actively processing
+  //   - oldest queued job < 20 min      → cron has touched it recently
+  // A long-running company-drain (one job cycling queued↔running through many
+  // ticks of BATCH=10) keeps job age old, so we accept up to 20 min of
+  // continuous activity rather than firing a false alarm.
   const draining =
-    (queued.count ?? 0) === 0 ||
-    (oldestQueuedJobAgeS !== null && oldestQueuedJobAgeS < 600);
+    (pendingContacts.count ?? 0) === 0 ||
+    (running.count ?? 0) > 0 ||
+    (oldestQueuedJobAgeS !== null && oldestQueuedJobAgeS < 1200);
 
   return NextResponse.json({
     timestamp: new Date(now).toISOString(),
