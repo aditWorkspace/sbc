@@ -21,16 +21,35 @@ export async function GET(req: Request) {
   const supa = supabaseService();
   const healed = await selfHealOrphanedCompanies(supa);
 
-  waitUntil(drainQueue(supa));
+  // Sync mode lets cron-job.org / curl see exactly what happened (handy for
+  // diagnostics). Default is async via waitUntil so the HTTP client returns fast.
+  const url = new URL(req.url);
+  const sync = url.searchParams.get('sync') === '1';
+  if (sync) {
+    const drainResult = await drainQueue(supa);
+    return NextResponse.json({ ok: true, healed, drain: 'sync', ...drainResult });
+  }
 
+  waitUntil(drainQueue(supa));
   return NextResponse.json({ ok: true, healed, drain: 'background' });
 }
 
-async function drainQueue(supa: ReturnType<typeof supabaseService>): Promise<void> {
+async function drainQueue(supa: ReturnType<typeof supabaseService>): Promise<{ picked: number; done: number; requeued: number; failed: number; pending_before: number; pending_after: number; per_job: any[] }> {
+  const result = { picked: 0, done: 0, requeued: 0, failed: 0, pending_before: 0, pending_after: 0, per_job: [] as any[] };
+  const { count: pendingBefore } = await supa.from('contacts')
+    .select('*', { count: 'exact', head: true }).eq('enrichment_status', 'pending');
+  result.pending_before = pendingBefore ?? 0;
+
   const { data: jobs } = await supa.from('enrichment_jobs')
     .select('id, company_id, attempts').eq('status', 'queued')
     .order('created_at', { ascending: true }).limit(10);
-  if (!jobs || jobs.length === 0) return;
+  if (!jobs || jobs.length === 0) {
+    const { count: pa } = await supa.from('contacts')
+      .select('*', { count: 'exact', head: true }).eq('enrichment_status', 'pending');
+    result.pending_after = pa ?? 0;
+    return result;
+  }
+  result.picked = jobs.length;
 
   for (const job of jobs) {
     await supa.from('enrichment_jobs').update({
@@ -39,6 +58,7 @@ async function drainQueue(supa: ReturnType<typeof supabaseService>): Promise<voi
       attempts: (job.attempts ?? 0) + 1,
     }).eq('id', job.id);
 
+    const pendingBeforeJob = await countPendingForCompany(supa, job.company_id);
     try {
       await processEnrichmentJob(supa, job.company_id);
       const stillPending = await countPendingForCompany(supa, job.company_id);
@@ -46,32 +66,42 @@ async function drainQueue(supa: ReturnType<typeof supabaseService>): Promise<voi
         await supa.from('enrichment_jobs').update({
           status: 'queued', locked_at: null,
         }).eq('id', job.id);
+        result.requeued++;
       } else {
         await supa.from('enrichment_jobs').update({
           status: 'done', completed_at: new Date().toISOString(),
         }).eq('id', job.id);
+        result.done++;
       }
+      result.per_job.push({ company_id: job.company_id, before: pendingBeforeJob, after: stillPending, dropped: pendingBeforeJob - stillPending });
     } catch (e: unknown) {
+      const errMsg = (e as Error)?.message ?? String(e);
+      result.per_job.push({ company_id: job.company_id, error: errMsg });
+      result.failed++;
       if (e instanceof IcypeasRateLimit) {
         await supa.from('enrichment_jobs').update({
           status: 'queued', locked_at: null, last_error: 'rate_limit',
         }).eq('id', job.id);
-        return;
+        break;
       }
       if (e instanceof IcypeasCreditsExhausted) {
         await supa.from('enrichment_jobs').update({
           status: 'queued', locked_at: null, last_error: 'credits_exhausted',
         }).eq('id', job.id);
-        return;
+        break;
       }
       const attempts = (job.attempts ?? 0) + 1;
       await supa.from('enrichment_jobs').update({
         status: attempts >= 3 ? 'failed' : 'queued',
         locked_at: null,
-        last_error: (e as Error)?.message ?? String(e),
+        last_error: errMsg,
       }).eq('id', job.id);
     }
   }
+  const { count: pa } = await supa.from('contacts')
+    .select('*', { count: 'exact', head: true }).eq('enrichment_status', 'pending');
+  result.pending_after = pa ?? 0;
+  return result;
 }
 
 // Find companies with pending contacts but no queued/running job, and insert one.
