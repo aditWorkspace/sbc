@@ -71,7 +71,7 @@ describe('icypeasBulkMatch', () => {
     expect(r.matches[0]?.email_status).toBe('guessed');
   });
 
-  it('returns null for item with no emails', async () => {
+  it('returns null (definite no-match) for terminal status with no emails', async () => {
     vi.stubGlobal('fetch', vi.fn()
       .mockResolvedValueOnce(mockResponse({ success: true, item: { _id: 'abc', status: 'NONE' } }))
       .mockResolvedValueOnce(pollItem({
@@ -82,6 +82,72 @@ describe('icypeasBulkMatch', () => {
     await vi.advanceTimersByTimeAsync(2100);
     const r = await promise;
     expect(r.matches[0]).toBeNull();
+  });
+
+  it('returns undefined (transient) when poll deadline is reached without terminal status', async () => {
+    // Submit returns id, then every poll returns IN_PROGRESS forever
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(mockResponse({ success: true, item: { _id: 'abc', status: 'NONE' } }))
+      .mockResolvedValue(pollItem({ status: 'IN_PROGRESS' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const promise = icypeasBulkMatch([{ first_name: 'A', last_name: 'B', organization_name: 'C' }]);
+    // TOTAL_TIMEOUT_MS = 35s, POLL_INTERVAL_MS = 2s — advance past deadline
+    await vi.advanceTimersByTimeAsync(40_000);
+    const r = await promise;
+    expect(r.matches[0]).toBeUndefined();
+  });
+
+  it('returns undefined (transient) on submit-time IcypeasError (e.g. 500)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('boom', { status: 500 })));
+    const r = await icypeasBulkMatch([{ first_name: 'A', last_name: 'B', organization_name: 'C' }]);
+    expect(r.matches[0]).toBeUndefined();
+  });
+
+  it('returns undefined (transient) on submit-time network error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValueOnce(new TypeError('fetch failed')));
+    const r = await icypeasBulkMatch([{ first_name: 'A', last_name: 'B', organization_name: 'C' }]);
+    expect(r.matches[0]).toBeUndefined();
+  });
+
+  it('returns undefined (transient) on read-time IcypeasError', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(mockResponse({ success: true, item: { _id: 'abc', status: 'NONE' } }))
+      .mockResolvedValueOnce(new Response('server err', { status: 500 })));
+    const promise = icypeasBulkMatch([{ first_name: 'A', last_name: 'B', organization_name: 'C' }]);
+    await vi.advanceTimersByTimeAsync(40_000);
+    const r = await promise;
+    expect(r.matches[0]).toBeUndefined();
+  });
+
+  it('mixed batch: terminal NOT_FOUND null, in-progress undefined, found object', async () => {
+    // Three submits, then polls. The three reads in any round can arrive in any order
+    // (Promise.all on the pending set), so route by id with fresh Response each call.
+    let submitCount = 0;
+    const submitIds = ['idA', 'idB', 'idC'];
+    const readBodies: Record<string, () => unknown> = {
+      idA: () => ({ success: true, items: [{ _id: 'idA', status: 'FOUND', results: { emails: [{ email: 'a@x.com', certainty: 'ultra_sure' }] } }] }),
+      idB: () => ({ success: true, items: [{ _id: 'idB', status: 'IN_PROGRESS' }] }),
+      idC: () => ({ success: true, items: [{ _id: 'idC', status: 'NOT_FOUND', results: { emails: [] } }] }),
+    };
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string);
+      if (body.firstname !== undefined) {
+        const id = submitIds[submitCount++]!;
+        return mockResponse({ success: true, item: { _id: id, status: 'NONE' } });
+      }
+      return mockResponse(readBodies[body.id]!());
+    }));
+
+    const promise = icypeasBulkMatch([
+      { first_name: 'A', last_name: 'A', organization_name: 'A' },
+      { first_name: 'B', last_name: 'B', organization_name: 'B' },
+      { first_name: 'C', last_name: 'C', organization_name: 'C' },
+    ]);
+    await vi.advanceTimersByTimeAsync(40_000);
+    const r = await promise;
+    expect(r.matches[0]).toMatchObject({ email: 'a@x.com' });
+    expect(r.matches[1]).toBeUndefined();   // still in-progress at deadline
+    expect(r.matches[2]).toBeNull();        // definite no-match
   });
 
   it('throws IcypeasCreditsExhausted on 402', async () => {

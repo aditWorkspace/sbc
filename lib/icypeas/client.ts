@@ -18,8 +18,14 @@ export interface BulkMatchPerson {
   last_name?: string;
 }
 
+// Tristate per index:
+//   BulkMatchPerson  — Icypeas returned a verified/guessed email
+//   null             — Icypeas reached a terminal status with no email (definite no-match — delete per policy)
+//   undefined        — transient: poll deadline hit, network blip, or non-fatal IcypeasError (caller should keep contact pending and retry next tick)
+export type BulkMatchResult = BulkMatchPerson | null | undefined;
+
 export interface BulkMatchResponse {
-  matches: (BulkMatchPerson | null)[];
+  matches: BulkMatchResult[];
 }
 
 const BASE = 'https://app.icypeas.com/api';
@@ -30,7 +36,7 @@ function certaintyToStatus(c: string | undefined): 'verified' | 'guessed' {
   return ['ultra_sure', 'very_sure', 'sure'].includes(c ?? '') ? 'verified' : 'guessed';
 }
 
-async function submitSingle(detail: BulkMatchDetail): Promise<string | null> {
+async function submitSingle(detail: BulkMatchDetail): Promise<string> {
   const res = await fetch(`${BASE}/email-search`, {
     method: 'POST',
     headers: {
@@ -47,7 +53,9 @@ async function submitSingle(detail: BulkMatchDetail): Promise<string | null> {
   if (res.status === 429) throw new IcypeasRateLimit();
   if (!res.ok) throw new IcypeasError(`Icypeas submit ${res.status}: ${await res.text()}`);
   const body = (await res.json()) as { success?: boolean; item?: { _id?: string } };
-  return body?.item?._id ?? null;
+  const id = body?.item?._id;
+  if (!id) throw new IcypeasError(`Icypeas submit returned no id: ${JSON.stringify(body)}`);
+  return id;
 }
 
 // Actual Icypeas response shape (verified empirically 2026-04-22):
@@ -110,16 +118,19 @@ export async function icypeasBulkMatch(details: BulkMatchDetail[]): Promise<Bulk
   if (details.length === 0) return { matches: [] };
   if (details.length > 10) throw new Error('icypeasBulkMatch: max 10 details per call');
 
-  // Submit all in parallel
-  const ids: (string | null)[] = await Promise.all(details.map(async d => {
+  // Submit all in parallel. A submit failure is transient — undefined for that index.
+  const ids: (string | undefined)[] = await Promise.all(details.map(async d => {
     try { return await submitSingle(d); }
     catch (e) {
       if (e instanceof IcypeasRateLimit || e instanceof IcypeasCreditsExhausted) throw e;
-      return null;
+      // Submit-time IcypeasError or network blip — transient, retry next tick
+      return undefined;
     }
   }));
 
-  const results: (BulkMatchPerson | null)[] = ids.map(() => null);
+  // Default every slot to undefined (= transient / unknown). Only flip to a definite
+  // value (BulkMatchPerson or null) once we get a terminal status from Icypeas.
+  const results: BulkMatchResult[] = ids.map(() => undefined);
   const pending = new Set<number>();
   ids.forEach((id, i) => { if (id) pending.add(i); });
 
@@ -131,15 +142,20 @@ export async function icypeasBulkMatch(details: BulkMatchDetail[]): Promise<Bulk
         const item = await readItem(ids[i]!);
         const status = item?.status;
         if (status && !NON_TERMINAL_STATUSES.has(status)) {
+          // Terminal: either we have an email (BulkMatchPerson) or definite no-match (null).
           results[i] = personFromItem(item);
           pending.delete(i);
         }
       } catch (e) {
         if (e instanceof IcypeasRateLimit || e instanceof IcypeasCreditsExhausted) throw e;
-        pending.delete(i);  // any other error = give up on this one
+        // Read-time error — leave as undefined (transient). Drop from poll set so we
+        // don't burn the whole deadline retrying a failing item; it'll get re-attempted
+        // next tick when the contact is still pending.
+        pending.delete(i);
       }
     }));
   }
+  // Anything still in `pending` at deadline stays undefined — caller treats as transient.
 
   return { matches: results };
 }

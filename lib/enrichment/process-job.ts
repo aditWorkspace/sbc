@@ -35,8 +35,8 @@ export async function processEnrichmentJob(supa: SupabaseClient, companyId: stri
   } catch (e) {
     if (e instanceof IcypeasRateLimit) throw e;
     if (e instanceof IcypeasCreditsExhausted) throw e;
-    // Other Icypeas errors — delete these pending rows per policy; rethrow for retry/failure counting
-    await supa.from('contacts').delete().in('id', pending.map((p: any) => p.id));
+    // Any other unexpected throw from the client — leave contacts pending (don't delete)
+    // and rethrow so the cron route can attempts++ / failure-count.
     throw e;
   }
 
@@ -45,7 +45,14 @@ export async function processEnrichmentJob(supa: SupabaseClient, companyId: stri
     const c: any = pending[i]!;
     const m = response.matches[i];
 
-    if (!m || !m.email) {
+    // Tristate from icypeasBulkMatch:
+    //   undefined = transient (poll deadline / network) — leave pending, retry next tick
+    //   null      = definite no-match — delete per policy
+    //   object    = email returned (verified or guessed) — process below
+    if (m === undefined) {
+      continue;
+    }
+    if (m === null || !m.email) {
       await supa.from('contacts').delete().eq('id', c.id);
       continue;
     }
