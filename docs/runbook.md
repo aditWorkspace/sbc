@@ -148,6 +148,13 @@ pnpm test:e2e      # Playwright
 pnpm run typecheck
 ```
 
+## Production gotchas (learned the hard way 2026-04-30)
+
+- **Vercel env vars must contain real values.** `vercel env ls` shows `Encrypted` for empty strings — the entries appear set but the runtime gets `""`. Verify with `vercel env pull .env.check --environment=production && grep ICYPEAS .env.check`. If empty: re-set via the Vercel API (CLI 51.x has a piping bug; `printf %s "$VAL" | vercel env add` quietly creates an empty value).
+- **Next.js extends `fetch` with caching, even for POST.** When polling a results endpoint that returns `{status: NONE → IN_PROGRESS → FOUND}`, the first POST response can get cached and replayed for every subsequent identical body, locking you to `NONE` forever. All Icypeas fetches in `lib/icypeas/client.ts` set `cache: 'no-store'`.
+- **Cron-job.org free tier has a 30s HTTP timeout.** `/api/cron/enrich` returns within ~1s by kicking the drain off via `waitUntil()` from `@vercel/functions`. Don't make the route block on real work.
+- **`enrichment_jobs_per_company_unique` is a partial index** that allows only one queued/running job per company. The cron route's drainQueue keeps the same row's status flipping queued↔running rather than inserting follow-up rows.
+
 ## Enrichment cron
 
 `vercel.json` schedules `/api/cron/enrich` every minute. This requires **Vercel Pro** (Hobby rejects sub-daily schedules at deploy time).
