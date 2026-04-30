@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { waitUntil } from '@vercel/functions';
 import { env } from '@/lib/env';
 import { supabaseService } from '@/lib/supabase/service';
 import { processEnrichmentJob, countPendingForCompany } from '@/lib/enrichment/process-job';
@@ -7,25 +8,30 @@ import { IcypeasRateLimit, IcypeasCreditsExhausted } from '@/lib/icypeas/client'
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
+// Cron-job.org's free tier closes the HTTP connection after 30s. Icypeas batches
+// commonly take 30-50s, so we'd always look like a failure to the pinger even
+// though Vercel was still processing. Fix: do the fast self-heal synchronously,
+// kick the slow drain off via waitUntil(), and return 200 within ~1s. waitUntil
+// keeps the Vercel function alive up to maxDuration so the work actually finishes.
 export async function GET(req: Request) {
   const auth = req.headers.get('authorization') ?? '';
   if (auth !== `Bearer ${env().CRON_SECRET}`) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
   const supa = supabaseService();
-
-  // Self-heal: any company with pending contacts but no active job gets re-queued.
-  // This recovers from the historical bug where reenqueueIfPending was racing the
-  // unique-job-per-company partial index and failing silently. Idempotent — relies
-  // on `enrichment_jobs_per_company_unique` to dedupe duplicate inserts.
   const healed = await selfHealOrphanedCompanies(supa);
 
+  waitUntil(drainQueue(supa));
+
+  return NextResponse.json({ ok: true, healed, drain: 'background' });
+}
+
+async function drainQueue(supa: ReturnType<typeof supabaseService>): Promise<void> {
   const { data: jobs } = await supa.from('enrichment_jobs')
     .select('id, company_id, attempts').eq('status', 'queued')
     .order('created_at', { ascending: true }).limit(10);
-  if (!jobs || jobs.length === 0) return NextResponse.json({ ok: true, processed: 0, healed });
+  if (!jobs || jobs.length === 0) return;
 
-  let processed = 0;
   for (const job of jobs) {
     await supa.from('enrichment_jobs').update({
       status: 'running',
@@ -35,8 +41,6 @@ export async function GET(req: Request) {
 
     try {
       await processEnrichmentJob(supa, job.company_id);
-      // If pending contacts remain for this company (we hit BATCH=10 ceiling),
-      // keep this job queued for the next tick. Mark 'done' only when truly drained.
       const stillPending = await countPendingForCompany(supa, job.company_id);
       if (stillPending > 0) {
         await supa.from('enrichment_jobs').update({
@@ -46,20 +50,19 @@ export async function GET(req: Request) {
         await supa.from('enrichment_jobs').update({
           status: 'done', completed_at: new Date().toISOString(),
         }).eq('id', job.id);
-        processed++;
       }
     } catch (e: unknown) {
       if (e instanceof IcypeasRateLimit) {
         await supa.from('enrichment_jobs').update({
           status: 'queued', locked_at: null, last_error: 'rate_limit',
         }).eq('id', job.id);
-        break;
+        return;
       }
       if (e instanceof IcypeasCreditsExhausted) {
         await supa.from('enrichment_jobs').update({
           status: 'queued', locked_at: null, last_error: 'credits_exhausted',
         }).eq('id', job.id);
-        break;
+        return;
       }
       const attempts = (job.attempts ?? 0) + 1;
       await supa.from('enrichment_jobs').update({
@@ -69,7 +72,6 @@ export async function GET(req: Request) {
       }).eq('id', job.id);
     }
   }
-  return NextResponse.json({ ok: true, processed, healed });
 }
 
 // Find companies with pending contacts but no queued/running job, and insert one.
