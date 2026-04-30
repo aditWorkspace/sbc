@@ -33,9 +33,9 @@ export async function GET(req: Request) {
     const id = submitJson?.item?._id;
     if (!id) return NextResponse.json({ log, error: 'no id from submit' });
 
-    // Manual poll up to 60s
-    for (let i = 0; i < 30; i++) {
-      await new Promise(r => setTimeout(r, 2000));
+    // Manual poll up to 100s with 5s interval
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 5000));
       const read = await fetch('https://app.icypeas.com/api/bulk-single-searchs/read', {
         method: 'POST',
         headers: { 'Authorization': env().ICYPEAS_API_KEY, 'Content-Type': 'application/json' },
