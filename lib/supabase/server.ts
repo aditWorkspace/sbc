@@ -3,6 +3,10 @@ import { cookies } from 'next/headers';
 import { env } from '@/lib/env';
 import type { Database } from './types';
 
+// Same Next.js extended-fetch caching gotcha as service.ts — opt out per request.
+const noCacheFetch: typeof fetch = (input, init) =>
+  fetch(input, { ...init, cache: 'no-store' });
+
 export function supabaseServer() {
   const store = cookies();
   return createServerClient<Database>(
@@ -17,6 +21,7 @@ export function supabaseServer() {
           );
         },
       },
+      global: { fetch: noCacheFetch },
     }
   );
 }

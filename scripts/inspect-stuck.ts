@@ -4,40 +4,31 @@
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
   const supa = createClient(url, key);
 
-  // Recent uploads
-  const { data: uploads } = await supa
-    .from('uploads').select('*').order('created_at', { ascending: false }).limit(5);
-  console.log('=== Recent uploads ===');
-  for (const u of uploads ?? []) {
-    console.log(`  ${(u as any).created_at} ${(u as any).filename} raw=${(u as any).row_count_raw} admitted=${(u as any).row_count_admitted} status=${(u as any).status}`);
+  console.log('=== apollo_samples (most recent 30) ===');
+  const { data: ss } = await supa.from('apollo_samples').select('*').order('id', { ascending: false }).limit(30);
+  for (const s of ss ?? []) {
+    const sa = s as any;
+    console.log(`  ${sa.person_first_name} ${sa.person_last_name} → ${sa.email_returned ?? '(none)'} pat=${sa.detected_pattern ?? '-'} reason=${sa.email_ignored_reason ?? 'matched'}`);
+  }
+  console.log(`Total samples: ${ss?.length}`);
+
+  console.log('\n=== Companies (full) ===');
+  const { data: cos } = await supa.from('companies').select('*').limit(50);
+  for (const c of cos ?? []) {
+    const ca = c as any;
+    console.log(`  "${ca.display_name}" id=${ca.id.slice(0,8)} conf=${ca.template_confidence} pat=${ca.template_pattern} dom=${ca.domain} samples=${ca.matching_samples}/${ca.sample_size} credits=${ca.apollo_credits_spent}`);
   }
 
-  // Pending by company
-  const { data: distinctCo } = await supa
-    .from('contacts').select('company_id, company_display, created_at')
-    .eq('enrichment_status', 'pending').limit(2000);
-  const byCo = new Map<string, { name: string; count: number; latest: string }>();
-  for (const r of distinctCo ?? []) {
-    const k = (r as any).company_id;
-    const e = byCo.get(k) ?? { name: (r as any).company_display, count: 0, latest: '' };
-    e.count++;
-    if (!e.latest || (r as any).created_at > e.latest) e.latest = (r as any).created_at;
-    byCo.set(k, e);
+  console.log('\n=== Jobs (all) ===');
+  const { data: jobs } = await supa.from('enrichment_jobs').select('*');
+  for (const j of jobs ?? []) {
+    const ja = j as any;
+    console.log(`  co=${ja.company_id.slice(0,8)} status=${ja.status} attempts=${ja.attempts} last_error=${ja.last_error}`);
   }
-  console.log(`\n=== Pending by company (${distinctCo?.length} total) ===`);
-  [...byCo.values()].sort((a, b) => b.count - a.count).forEach(c =>
-    console.log(`  ${c.count.toString().padStart(4)} contacts — "${c.name}" (latest ${c.latest})`));
 
-  // Job state for each
-  console.log('\n=== Jobs ===');
-  for (const cid of byCo.keys()) {
-    const { data: jobs } = await supa
-      .from('enrichment_jobs').select('*').eq('company_id', cid)
-      .order('created_at', { ascending: false }).limit(2);
-    const co = byCo.get(cid)!;
-    console.log(`  "${co.name}":`);
-    for (const j of jobs ?? []) {
-      console.log(`    ${(j as any).status} attempts=${(j as any).attempts} last_error=${(j as any).last_error}`);
-    }
+  console.log('\n=== Contact status counts ===');
+  for (const status of ['pending', 'enriched']) {
+    const { count } = await supa.from('contacts').select('*', { count: 'exact', head: true }).eq('enrichment_status', status);
+    console.log(`  ${status}: ${count ?? 0}`);
   }
 })();
