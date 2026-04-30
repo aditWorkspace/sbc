@@ -14,7 +14,6 @@ export async function processEnrichmentJob(supa: SupabaseClient, companyId: stri
   if (['HIGH','MEDIUM','LOW'].includes(company.template_confidence)
       && company.template_pattern && company.domain) {
     await fillPendingViaTemplate(supa, company);
-    await reenqueueIfPending(supa, companyId);
     return;
   }
 
@@ -135,7 +134,21 @@ export async function processEnrichmentJob(supa: SupabaseClient, companyId: stri
     const { data: updated } = await supa.from('companies').select('*').eq('id', companyId).single();
     if (updated) await fillPendingViaTemplate(supa, updated);
   }
-  await reenqueueIfPending(supa, companyId);
+}
+
+// Helper: count contacts still pending for a company. Callers use this after
+// processEnrichmentJob to decide whether to mark the job 'done' or keep it 'queued'
+// for the next tick. We can't insert a *new* job per call because of the
+// `enrichment_jobs_per_company_unique` partial index — there can be at most one
+// queued/running job per company at a time.
+export async function countPendingForCompany(
+  supa: SupabaseClient,
+  companyId: string,
+): Promise<number> {
+  const { count } = await supa.from('contacts')
+    .select('*', { count: 'exact', head: true })
+    .eq('company_id', companyId).eq('enrichment_status', 'pending');
+  return count ?? 0;
 }
 
 async function fillPendingViaTemplate(supa: SupabaseClient, company: any): Promise<void> {
@@ -156,11 +169,3 @@ async function fillPendingViaTemplate(supa: SupabaseClient, company: any): Promi
   }
 }
 
-async function reenqueueIfPending(supa: SupabaseClient, companyId: string): Promise<void> {
-  const { count } = await supa.from('contacts')
-    .select('*', { count: 'exact', head: true })
-    .eq('company_id', companyId).eq('enrichment_status', 'pending');
-  if (count && count > 0) {
-    await supa.from('enrichment_jobs').insert({ company_id: companyId }).then(() => {}, () => {});
-  }
-}

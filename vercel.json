@@ -4,9 +4,9 @@
     { "path": "/api/cron/enrich", "schedule": "* * * * *" }
   ],
   "functions": {
-    "app/api/cron/enrich/route.ts": { "maxDuration": 60 },
+    "app/api/cron/enrich/route.ts": { "maxDuration": 300 },
     "app/api/cron/cleanup/route.ts": { "maxDuration": 60 },
-    "app/api/uploads/route.ts": { "maxDuration": 60 },
+    "app/api/uploads/route.ts": { "maxDuration": 300 },
     "app/api/sheets/route.ts": { "maxDuration": 60 }
   }
 }
