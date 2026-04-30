@@ -29,8 +29,11 @@ export interface BulkMatchResponse {
 }
 
 const BASE = 'https://app.icypeas.com/api';
-const POLL_INTERVAL_MS = 2000;
-const TOTAL_TIMEOUT_MS = 35_000;
+const POLL_INTERVAL_MS = 1500;
+// On Vercel functions, polls take ~2x as long to terminal status as on a local
+// laptop (observed: 35s laptop ≈ 70s Vercel for the same 10-contact batch).
+// We have 300s of function budget via maxDuration, so be generous.
+const TOTAL_TIMEOUT_MS = 90_000;
 
 function certaintyToStatus(c: string | undefined): 'verified' | 'guessed' {
   return ['ultra_sure', 'very_sure', 'sure'].includes(c ?? '') ? 'verified' : 'guessed';

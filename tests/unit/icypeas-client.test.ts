@@ -91,8 +91,8 @@ describe('icypeasBulkMatch', () => {
       .mockResolvedValue(pollItem({ status: 'IN_PROGRESS' }));
     vi.stubGlobal('fetch', fetchMock);
     const promise = icypeasBulkMatch([{ first_name: 'A', last_name: 'B', organization_name: 'C' }]);
-    // TOTAL_TIMEOUT_MS = 35s, POLL_INTERVAL_MS = 2s — advance past deadline
-    await vi.advanceTimersByTimeAsync(40_000);
+    // TOTAL_TIMEOUT_MS = 90s — advance past deadline
+    await vi.advanceTimersByTimeAsync(95_000);
     const r = await promise;
     expect(r.matches[0]).toBeUndefined();
   });
@@ -114,7 +114,7 @@ describe('icypeasBulkMatch', () => {
       .mockResolvedValueOnce(mockResponse({ success: true, item: { _id: 'abc', status: 'NONE' } }))
       .mockResolvedValueOnce(new Response('server err', { status: 500 })));
     const promise = icypeasBulkMatch([{ first_name: 'A', last_name: 'B', organization_name: 'C' }]);
-    await vi.advanceTimersByTimeAsync(40_000);
+    await vi.advanceTimersByTimeAsync(95_000);
     const r = await promise;
     expect(r.matches[0]).toBeUndefined();
   });
@@ -143,7 +143,7 @@ describe('icypeasBulkMatch', () => {
       { first_name: 'B', last_name: 'B', organization_name: 'B' },
       { first_name: 'C', last_name: 'C', organization_name: 'C' },
     ]);
-    await vi.advanceTimersByTimeAsync(40_000);
+    await vi.advanceTimersByTimeAsync(95_000);
     const r = await promise;
     expect(r.matches[0]).toMatchObject({ email: 'a@x.com' });
     expect(r.matches[1]).toBeUndefined();   // still in-progress at deadline
