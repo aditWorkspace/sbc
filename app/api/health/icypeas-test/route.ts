@@ -19,6 +19,20 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const mode = url.searchParams.get('mode') ?? 'bulk';
 
+  // Mode read: poll a known id (passed via ?id=) and dump the raw body
+  if (mode === 'read') {
+    const id = url.searchParams.get('id');
+    if (!id) return NextResponse.json({ error: 'need ?id=' }, { status: 400 });
+    const t0 = Date.now();
+    const res = await fetch('https://app.icypeas.com/api/bulk-single-searchs/read', {
+      method: 'POST',
+      headers: { 'Authorization': env().ICYPEAS_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    const body = await res.text();
+    return NextResponse.json({ took_ms: Date.now() - t0, http: res.status, body: body.slice(0, 2000) });
+  }
+
   if (mode === 'single') {
     const t0 = Date.now();
     const log: any[] = [];
