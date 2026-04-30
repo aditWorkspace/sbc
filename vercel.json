@@ -1,7 +1,6 @@
 {
   "crons": [
-    { "path": "/api/cron/cleanup", "schedule": "0 9 * * *" },
-    { "path": "/api/cron/enrich", "schedule": "* * * * *" }
+    { "path": "/api/cron/cleanup", "schedule": "0 9 * * *" }
   ],
   "functions": {
     "app/api/cron/enrich/route.ts": { "maxDuration": 300 },
