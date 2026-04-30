@@ -82,12 +82,16 @@ async function drainQueue(supa: ReturnType<typeof supabaseService>): Promise<{ p
         await supa.from('enrichment_jobs').update({
           status: 'queued', locked_at: null, last_error: 'rate_limit',
         }).eq('id', job.id);
-        break;
+        // Don't break — give other companies a chance. Brief cooldown to let
+        // the rate-limit window slide before the next attempt.
+        await new Promise(r => setTimeout(r, 5000));
+        continue;
       }
       if (e instanceof IcypeasCreditsExhausted) {
         await supa.from('enrichment_jobs').update({
           status: 'queued', locked_at: null, last_error: 'credits_exhausted',
         }).eq('id', job.id);
+        // Credits ARE actually exhausted globally — break is correct here.
         break;
       }
       const attempts = (job.attempts ?? 0) + 1;

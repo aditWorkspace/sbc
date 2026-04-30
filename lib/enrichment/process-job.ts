@@ -4,7 +4,7 @@ import { detectPattern, isPersonalDomain, renderTemplate, type Pattern } from '@
 import { normalize } from '@/lib/csv/normalize';
 import { tallySamples, evaluateConfidence } from '@/lib/enrichment/tally';
 
-const BATCH = 10;
+const BATCH = 5;
 
 export async function processEnrichmentJob(supa: SupabaseClient, companyId: string): Promise<void> {
   const { data: company } = await supa.from('companies').select('*').eq('id', companyId).single();
