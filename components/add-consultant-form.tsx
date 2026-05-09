@@ -30,7 +30,7 @@ export function AddConsultantForm() {
     <form onSubmit={submit} className="flex gap-2 items-start">
       <Input placeholder="name@berkeley.edu" value={email}
              onChange={e => setEmail(e.target.value)} className="max-w-sm" />
-      <Button type="submit" disabled={loading || !email}>Add consultant</Button>
+      <Button type="submit" disabled={loading || !email}>Add PM</Button>
       {error && <p className="text-sm text-destructive">{error}</p>}
     </form>
   );

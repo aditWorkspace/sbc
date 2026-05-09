@@ -88,38 +88,60 @@ export async function POST(req: Request) {
   const result = await ingestUpload(supa, auth.consultant.id, filename ?? null, raw);
 
   // Auto-trigger enrichment for the jobs this upload just created. Drain inline
-  // bounded by maxDuration and BUDGET_MS; the rest stays queued for cron.
+  // bounded by maxDuration and BUDGET_MS; the cron picks up the rest.
+  // Prioritises THIS upload's company jobs so the user's progress bar moves
+  // even when other consultants have older jobs in the queue.
   if (result.pending > 0) {
     const { processEnrichmentJob, countPendingForCompany } = await import('@/lib/enrichment/process-job');
     const { IcypeasRateLimit, IcypeasCreditsExhausted } = await import('@/lib/icypeas/client');
     const BUDGET_MS = 270_000;
     const deadline = Date.now() + BUDGET_MS;
-    const { data: jobs } = await supa.from('enrichment_jobs')
-      .select('id, company_id').eq('status', 'queued').order('created_at').limit(20);
-    for (const job of (jobs ?? [])) {
+
+    const { data: myCompanyRows } = await supa
+      .from('contacts').select('company_id').eq('upload_id', result.uploadId);
+    const myCompanyIds = Array.from(new Set((myCompanyRows ?? []).map((r: any) => r.company_id)));
+    const { data: myJobs } = myCompanyIds.length
+      ? await supa.from('enrichment_jobs')
+          .select('id, company_id').eq('status', 'queued')
+          .in('company_id', myCompanyIds).order('created_at')
+      : { data: [] };
+
+    for (const job of (myJobs ?? [])) {
       if (Date.now() > deadline) break;
-      try {
-        await supa.from('enrichment_jobs').update({
-          status: 'running', locked_at: new Date().toISOString(),
-        }).eq('id', job.id);
-        await processEnrichmentJob(supa, job.company_id);
-        // Keep job queued if more contacts remain (BATCH=10 ceiling per tick); else done.
-        const stillPending = await countPendingForCompany(supa, job.company_id);
-        if (stillPending > 0) {
+      // Drain this company FULLY (or until budget runs out) before moving on,
+      // so the consultant sees concrete companies finish rather than every
+      // company getting one batch.
+      let safetyCounter = 0;
+      while (Date.now() < deadline && safetyCounter++ < 50) {
+        try {
           await supa.from('enrichment_jobs').update({
-            status: 'queued', locked_at: null,
+            status: 'running', locked_at: new Date().toISOString(),
           }).eq('id', job.id);
-        } else {
+          await processEnrichmentJob(supa, job.company_id);
+          const stillPending = await countPendingForCompany(supa, job.company_id);
+          if (stillPending > 0) {
+            await supa.from('enrichment_jobs').update({
+              status: 'queued', locked_at: null,
+            }).eq('id', job.id);
+            continue;
+          }
           await supa.from('enrichment_jobs').update({
             status: 'done', completed_at: new Date().toISOString(),
           }).eq('id', job.id);
+          break;
+        } catch (e) {
+          await supa.from('enrichment_jobs').update({
+            status: 'queued', locked_at: null,
+            last_error: (e as Error)?.message ?? String(e),
+          }).eq('id', job.id);
+          if (e instanceof IcypeasCreditsExhausted) return NextResponse.json(result);
+          if (e instanceof IcypeasRateLimit) {
+            // Brief cooldown then move on to next company (don't get stuck retrying same one)
+            await new Promise(r => setTimeout(r, 5000));
+            break;
+          }
+          break;
         }
-      } catch (e) {
-        await supa.from('enrichment_jobs').update({
-          status: 'queued', locked_at: null,
-          last_error: (e as Error)?.message ?? String(e),
-        }).eq('id', job.id);
-        if (e instanceof IcypeasRateLimit || e instanceof IcypeasCreditsExhausted) break;
       }
     }
   }

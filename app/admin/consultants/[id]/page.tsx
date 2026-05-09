@@ -15,10 +15,10 @@ function RoleBadge({ role }: { role: string }) {
   if (role === 'admin') {
     return <Badge variant="outline" className="border-emerald-500 text-emerald-600">ADMIN</Badge>;
   }
-  if (role === 'jr_consultant') {
-    return <Badge variant="outline" className="border-yellow-500 text-yellow-600">JR CONSULTANT</Badge>;
+  if (role === 'senior_consultant') {
+    return <Badge variant="outline" className="border-yellow-500 text-yellow-600">SENIOR CONSULTANT</Badge>;
   }
-  return <Badge variant="outline" className="text-muted-foreground">CONSULTANT</Badge>;
+  return <Badge variant="outline" className="text-muted-foreground">PM</Badge>;
 }
 
 export default async function ConsultantDrilldown({ params }: { params: { id: string } }) {
@@ -49,7 +49,7 @@ export default async function ConsultantDrilldown({ params }: { params: { id: st
             {c.deactivated_at ? <Badge variant="destructive">deactivated</Badge>
               : c.is_approved ? <Badge variant="secondary">approved</Badge>
               : <Badge variant="outline">pending</Badge>}
-            <RoleBadge role={c.role ?? 'consultant'} />
+            <RoleBadge role={c.role ?? 'pm'} />
           </div>
         </div>
         <ConsultantActions
@@ -57,7 +57,7 @@ export default async function ConsultantDrilldown({ params }: { params: { id: st
           isApproved={c.is_approved}
           isAdmin={c.is_admin}
           isDeactivated={!!c.deactivated_at}
-          currentRole={(c.role ?? 'consultant') as 'owner' | 'admin' | 'consultant' | 'jr_consultant'}
+          currentRole={(c.role ?? 'pm') as 'owner' | 'admin' | 'pm' | 'senior_consultant'}
           viewerRole={viewerRole}
           viewerId={viewerId}
         />

@@ -44,6 +44,6 @@ export async function requireOwner(): Promise<AuthOutcome> {
 export async function requireCanPullSheet(): Promise<AuthOutcome> {
   const r = await requireApprovedConsultant();
   if ('error' in r) return r;
-  if (r.consultant.role === 'jr_consultant') return { error: 'forbidden' };
+  if (r.consultant.role === 'senior_consultant') return { error: 'forbidden' };
   return { consultant: r.consultant };
 }

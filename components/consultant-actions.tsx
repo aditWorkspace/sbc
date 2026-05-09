@@ -6,11 +6,11 @@ import { useRouter } from 'next/navigation';
 const ROLE_LABELS: Record<string, string> = {
   owner: 'Owner',
   admin: 'Admin',
-  consultant: 'Consultant',
-  jr_consultant: 'Jr Consultant',
+  pm: 'PM',
+  senior_consultant: 'Senior Consultant',
 };
 
-const ALL_ROLES = ['owner', 'admin', 'consultant', 'jr_consultant'] as const;
+const ALL_ROLES = ['owner', 'admin', 'pm', 'senior_consultant'] as const;
 type Role = typeof ALL_ROLES[number];
 
 interface Props {

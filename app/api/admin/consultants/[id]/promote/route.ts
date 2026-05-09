@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { requireOwner } from '@/lib/auth/current';
 import { supabaseService } from '@/lib/supabase/service';
 
-const Body = z.object({ make_admin: z.boolean().optional(), role: z.enum(['owner', 'admin', 'consultant', 'jr_consultant']).optional() });
+const Body = z.object({ make_admin: z.boolean().optional(), role: z.enum(['owner', 'admin', 'pm', 'senior_consultant']).optional() });
 
 export async function POST(req: Request, { params }: { params: { id: string } }) {
   const auth = await requireOwner();

@@ -16,10 +16,10 @@ function RoleBadge({ role }: { role: string }) {
   if (role === 'admin') {
     return <Badge variant="outline" className="border-emerald-500 text-emerald-600">ADMIN</Badge>;
   }
-  if (role === 'jr_consultant') {
-    return <Badge variant="outline" className="border-yellow-500 text-yellow-600">JR</Badge>;
+  if (role === 'senior_consultant') {
+    return <Badge variant="outline" className="border-yellow-500 text-yellow-600">SENIOR CONSULTANT</Badge>;
   }
-  return <Badge variant="outline" className="text-muted-foreground">CONSULTANT</Badge>;
+  return <Badge variant="outline" className="text-muted-foreground">PM</Badge>;
 }
 
 export default async function ConsultantsTab() {
@@ -34,9 +34,9 @@ export default async function ConsultantsTab() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Consultants</h1>
+      <h1 className="text-2xl font-bold">PMs</h1>
       <Card>
-        <CardHeader><CardTitle>Add consultant</CardTitle></CardHeader>
+        <CardHeader><CardTitle>Add PM</CardTitle></CardHeader>
         <CardContent><AddConsultantForm /></CardContent>
       </Card>
       <Card>
@@ -61,7 +61,7 @@ export default async function ConsultantsTab() {
                   </TableCell>
                   <TableCell>{c.display_name ?? '—'}</TableCell>
                   <TableCell>
-                    <RoleBadge role={c.role ?? 'consultant'} />
+                    <RoleBadge role={c.role ?? 'pm'} />
                   </TableCell>
                   <TableCell className="space-x-1">
                     {c.deactivated_at ? <Badge variant="destructive">deactivated</Badge>
@@ -75,7 +75,7 @@ export default async function ConsultantsTab() {
                       isApproved={c.is_approved}
                       isAdmin={c.is_admin}
                       isDeactivated={!!c.deactivated_at}
-                      currentRole={(c.role ?? 'consultant') as 'owner' | 'admin' | 'consultant' | 'jr_consultant'}
+                      currentRole={(c.role ?? 'pm') as 'owner' | 'admin' | 'pm' | 'senior_consultant'}
                       viewerRole={viewerRole}
                       viewerId={viewerId}
                     />

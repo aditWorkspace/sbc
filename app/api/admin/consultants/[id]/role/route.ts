@@ -4,7 +4,7 @@ import { requireOwner } from '@/lib/auth/current';
 import { supabaseService } from '@/lib/supabase/service';
 
 const Body = z.object({
-  role: z.enum(['owner', 'admin', 'consultant', 'jr_consultant']),
+  role: z.enum(['owner', 'admin', 'pm', 'senior_consultant']),
 });
 
 export async function POST(req: Request, { params }: { params: { id: string } }) {

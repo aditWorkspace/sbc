@@ -32,6 +32,11 @@ const STAT_ROWS: { key: keyof Summary; label: string }[] = [
   { key: 'enrichedInstantly', label: 'ENRICHED' },
 ];
 
+// Keep polling for 30 minutes — large CSVs (200+ rows) can take 15-20 min to
+// fully drain via the minute-cron at BATCH=5/company/tick. Showing "done"
+// before pending=0 misleads consultants into thinking enrichment failed.
+const POLL_TIMEOUT_MS = 30 * 60_000;
+
 export function UploadZone() {
   const [stage, setStage] = useState<Stage>('idle');
   const [msg, setMsg] = useState<string>('');
@@ -39,7 +44,7 @@ export function UploadZone() {
   const [enriched, setEnriched] = useState<number>(0);
   const [pending, setPending] = useState<number>(0);
   const [error, setError] = useState<string>('');
-  const [submitTime, setSubmitTime] = useState<number | null>(null);
+  const [pollTimedOut, setPollTimedOut] = useState<boolean>(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Poll upload status while pending > 0
@@ -56,18 +61,19 @@ export function UploadZone() {
         setStage('done');
         return;
       }
-      if (Date.now() - started > 5 * 60_000) {
-        setStage('done');
-        return;
+      if (Date.now() - started > POLL_TIMEOUT_MS) {
+        // Stop polling but stay in 'processing' state — work is still happening
+        // server-side via the cron, we just stop watching from this tab.
+        setPollTimedOut(true);
       }
     };
     tick();
-    const id = setInterval(tick, 2000);
+    const id = setInterval(tick, 3000);
     return () => clearInterval(id);
   }, [stage, summary]);
 
   async function handleFile(file: File) {
-    setError(''); setSummary(null); setEnriched(0); setPending(0);
+    setError(''); setSummary(null); setEnriched(0); setPending(0); setPollTimedOut(false);
 
     setStage('reading');
     setMsg('Reading file...');
@@ -93,7 +99,6 @@ export function UploadZone() {
       return;
     }
     setSummary(body);
-    setSubmitTime(Date.now());
     setEnriched(body.enrichedInstantly ?? 0);
     setPending(body.pending ?? 0);
     if ((body.pending ?? 0) === 0) {
@@ -105,7 +110,10 @@ export function UploadZone() {
   }
 
   const total = summary ? summary.admitted : 0;
-  const progressPct = total > 0 ? Math.round((enriched / total) * 100) : 0;
+  // Show progress as enriched + (admitted - enriched - pending) deletes.
+  // i.e., everything that's been DECIDED about, vs everything still pending.
+  const decided = total - pending;
+  const progressPct = total > 0 ? Math.round((decided / total) * 100) : 0;
 
   return (
     <div className="space-y-3">
@@ -157,21 +165,20 @@ export function UploadZone() {
               <div className="flex justify-between text-xs text-muted-foreground">
                 <span>
                   {stage === 'processing'
-                    ? `Enriching via Icypeas: ${enriched} of ${total} done, ${pending} pending...`
-                    : `Enrichment complete: ${enriched} of ${total} enriched${total - enriched > 0 ? `, ${total - enriched} failed or deleted` : ''}`}
+                    ? `Enriching via Icypeas: ${enriched} added to pool, ${pending} still being processed...`
+                    : `Done — ${enriched} added to pool${total - enriched > 0 ? `, ${total - enriched} couldn't be matched` : ''}`}
                 </span>
                 <span className="font-mono">{progressPct}%</span>
               </div>
               <Progress value={progressPct} />
-              {stage === 'processing' && (
+              {stage === 'processing' && !pollTimedOut && (
                 <p className="text-xs text-muted-foreground italic">
-                  Rows get deleted if Icypeas can&apos;t find a verified email for them — that&apos;s expected.
+                  Icypeas can take a few minutes for large lists. You can leave this page open or come back later — enrichment continues server-side either way. Rows that can&apos;t be matched are skipped automatically.
                 </p>
               )}
-              {stage === 'processing' && pending > 0 && Date.now() - (submitTime ?? 0) > 60_000 && (
+              {stage === 'processing' && pollTimedOut && (
                 <p className="text-xs text-amber-400">
-                  Enrichment seems slow — if this is local dev, trigger the worker:
-                  <code className="bg-muted px-1 mx-1 text-xs font-mono">curl -H &quot;Authorization: Bearer $CRON_SECRET&quot; http://localhost:3010/api/cron/enrich</code>
+                  Still processing in the background. Refresh this page or check the History tab in a few minutes to see final results.
                 </p>
               )}
             </div>

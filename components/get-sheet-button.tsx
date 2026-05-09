@@ -32,8 +32,8 @@ export function GetSheetButton() {
     if (res.status === 403) {
       const body = await res.json().catch(() => ({}));
       setStage('error');
-      if (body.error === 'jr_consultant_cannot_pull') {
-        setErr(body.message ?? 'Jr consultants cannot pull sheets yet.');
+      if (body.error === 'senior_consultant_cannot_pull') {
+        setErr(body.message ?? 'Senior consultants cannot pull sheets yet.');
       } else {
         setErr('You do not have permission to pull a sheet.');
       }

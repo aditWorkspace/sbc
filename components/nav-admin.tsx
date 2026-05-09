@@ -7,11 +7,11 @@ export function NavAdmin({ name, role }: { name: string; role: 'owner' | 'admin'
         <div className="flex items-center gap-6">
           <Link href="/admin" className="font-semibold">SBC Admin</Link>
           <Link href="/admin" className="text-sm text-muted-foreground hover:text-foreground">Overview</Link>
-          <Link href="/admin/consultants" className="text-sm text-muted-foreground hover:text-foreground">Consultants</Link>
+          <Link href="/admin/consultants" className="text-sm text-muted-foreground hover:text-foreground">PMs</Link>
           <Link href="/admin/templates" className="text-sm text-muted-foreground hover:text-foreground">Templates</Link>
           <Link href="/admin/pool" className="text-sm text-muted-foreground hover:text-foreground">Pool</Link>
           <Link href="/admin/settings" className="text-sm text-muted-foreground hover:text-foreground">Settings</Link>
-          <Link href="/dashboard" className="text-sm text-muted-foreground hover:text-foreground">← Consultant view</Link>
+          <Link href="/dashboard" className="text-sm text-muted-foreground hover:text-foreground">← PM view</Link>
         </div>
         <div className="flex items-center gap-2">
           <span className="text-sm text-muted-foreground">{name}</span>

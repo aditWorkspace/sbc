@@ -36,7 +36,7 @@ export default async function Dashboard() {
 
   const recentUploads = recentUploadsRes.data ?? [];
   const recentSheets = recentSheetsRes.data ?? [];
-  const isJrConsultant = c.role === 'jr_consultant';
+  const isSeniorConsultant = c.role === 'senior_consultant';
 
   return (
     <div className="space-y-6">
@@ -132,12 +132,12 @@ export default async function Dashboard() {
         </div>
       )}
 
-      {/* ── Get a sheet / Jr consultant banner ──────────────── */}
-      {isJrConsultant ? (
+      {/* ── Get a sheet / Senior consultant banner ──────────────── */}
+      {isSeniorConsultant ? (
         <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/5 p-4 text-sm">
-          <p className="font-semibold text-yellow-600 dark:text-yellow-400">You&apos;re a Jr Consultant</p>
+          <p className="font-semibold text-yellow-600 dark:text-yellow-400">You&apos;re a Senior Consultant</p>
           <p className="mt-1 text-muted-foreground">
-            Focus on uploading leads. You&apos;ll be promoted to full consultant to pull sheets.
+            Focus on uploading leads. You&apos;ll be promoted to PM to pull sheets.
           </p>
         </div>
       ) : (

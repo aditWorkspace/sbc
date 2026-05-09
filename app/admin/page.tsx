@@ -35,12 +35,12 @@ export default async function AdminOverview({ searchParams }: { searchParams: { 
       </div>
 
       <Card>
-        <CardHeader><CardTitle>Consultant activity</CardTitle></CardHeader>
+        <CardHeader><CardTitle>PM activity</CardTitle></CardHeader>
         <CardContent>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Consultant</TableHead>
+                <TableHead>PM</TableHead>
                 <TableHead className="text-right">Uploaded</TableHead>
                 <TableHead className="text-right">Sheets</TableHead>
                 <TableHead className="text-right">Rows out</TableHead>
