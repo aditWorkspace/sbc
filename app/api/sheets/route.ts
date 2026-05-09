@@ -13,7 +13,7 @@ export async function POST() {
   if ('error' in auth) {
     if (auth.error === 'forbidden') {
       return NextResponse.json(
-        { error: 'jr_consultant_cannot_pull', message: 'Jr consultants can source emails but cannot pull sheets yet.' },
+        { error: 'senior_consultant_cannot_pull', message: 'Senior consultants can source emails but cannot pull sheets yet.' },
         { status: 403 }
       );
     }

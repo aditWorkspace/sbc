@@ -1,58 +1,60 @@
 (async () => {
   const { createClient } = await import('@supabase/supabase-js');
-  const { processEnrichmentJob } = await import('@/lib/enrichment/process-job');
   const supa = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
 
-  // Find google.com company + my test consultant
-  const { data: co } = await supa.from('companies').select('*').eq('name_normalized', 'googlecom').single();
-  const coId = (co as any).id;
-  const { data: cons } = await supa.from('consultants').select('id').eq('email', 'system-e2e@berkeley.edu').single();
-  const consId = (cons as any).id;
+  // Pool state
+  const { count: pending } = await supa.from('contacts').select('*', { count: 'exact', head: true }).eq('enrichment_status', 'pending');
+  const { count: enriched } = await supa.from('contacts').select('*', { count: 'exact', head: true }).eq('enrichment_status', 'enriched');
+  console.log(`Pool — pending: ${pending}, enriched: ${enriched}`);
 
-  // Wipe state for google
-  console.log('Wiping state for google.com...');
-  await supa.from('apollo_samples').delete().eq('company_id', coId);
-  await supa.from('contacts').delete().eq('company_id', coId);
-  await supa.from('companies').update({
-    template_confidence: 'UNKNOWN', template_pattern: null, domain: null,
-    sample_size: 0, matching_samples: 0, locked_at: null, apollo_credits_spent: 0,
-  }).eq('id', coId);
+  // Sample reasons distribution
+  const { data: samples } = await supa.from('apollo_samples').select('email_ignored_reason').limit(2000);
+  const reasonCount = new Map<string, number>();
+  for (const s of samples ?? []) {
+    const r = (s as any).email_ignored_reason ?? 'matched';
+    reasonCount.set(r, (reasonCount.get(r) ?? 0) + 1);
+  }
+  console.log(`\nSample outcomes (${samples?.length} total):`);
+  for (const [r, c] of [...reasonCount.entries()].sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${c.toString().padStart(4)}  ${r}`);
+  }
 
-  // Need an upload row
-  const { data: up } = await supa.from('uploads').insert({
-    consultant_id: consId, filename: 'trace-test.csv', row_count_raw: 1,
-  }).select('id').single();
+  // Companies and their lock state
+  const { data: cos } = await supa.from('companies').select('display_name, template_confidence, template_pattern, domain, sample_size, matching_samples, apollo_credits_spent').order('apollo_credits_spent', { ascending: false }).limit(30);
+  console.log(`\nCompanies (top 30 by credits):`);
+  console.log('  conf      pat            dom                  samples  match  credits  display_name');
+  for (const c of cos ?? []) {
+    const ca = c as any;
+    console.log(`  ${ca.template_confidence.padEnd(10)} ${(ca.template_pattern ?? '-').padEnd(14)} ${(ca.domain ?? '-').padEnd(20)} ${(ca.sample_size ?? 0).toString().padStart(4)}    ${(ca.matching_samples ?? 0).toString().padStart(4)}   ${(ca.apollo_credits_spent ?? 0).toString().padStart(5)}    ${ca.display_name}`);
+  }
 
-  // Insert exactly 1 contact: Sundar
-  console.log('Inserting Sundar...');
-  const { data: ins } = await supa.from('contacts').insert({
-    first_name: 'Sundar', last_name: 'Pichai',
-    first_name_normalized: 'sundar', last_name_normalized: 'pichai',
-    company_id: coId, company_display: 'google.com',
-    normalized_key: `sundar|pichai|googlecom-${Date.now()}`,
-    enrichment_status: 'pending',
-    uploaded_by: consId, upload_id: (up as any).id,
-  }).select('id').single();
-  console.log(`Sundar id=${(ins as any).id}`);
+  // Detected patterns distribution among samples that DID match
+  const { data: matchedSamples } = await supa.from('apollo_samples').select('detected_pattern, detected_domain, company_id').is('email_ignored_reason', null).not('detected_pattern', 'is', null).limit(2000);
+  const patternsByCompany = new Map<string, Map<string, number>>();
+  for (const s of matchedSamples ?? []) {
+    const cid = (s as any).company_id;
+    const pat = (s as any).detected_pattern;
+    if (!patternsByCompany.has(cid)) patternsByCompany.set(cid, new Map());
+    const m = patternsByCompany.get(cid)!;
+    m.set(pat, (m.get(pat) ?? 0) + 1);
+  }
+  // Show companies with >1 distinct pattern (these prevent lock)
+  console.log(`\nCompanies where samples disagree on pattern (preventing lock):`);
+  let mixed = 0;
+  for (const [cid, pats] of patternsByCompany) {
+    if (pats.size > 1) {
+      const co = (cos ?? []).find((c: any) => c.id === cid);
+      console.log(`  ${co ? (co as any).display_name : cid.slice(0, 8)}: ${[...pats.entries()].map(([p, n]) => `${p}=${n}`).join(', ')}`);
+      mixed++;
+    }
+  }
+  console.log(`  → ${mixed} companies with mixed patterns`);
 
-  // Call processEnrichmentJob directly
-  console.log('\nCalling processEnrichmentJob locally...');
-  const t0 = Date.now();
-  await processEnrichmentJob(supa, coId);
-  console.log(`Done in ${Date.now() - t0}ms`);
-
-  // Check Sundar's state
-  const { data: after } = await supa.from('contacts').select('*').eq('id', (ins as any).id).maybeSingle();
-  console.log('\nSundar state after:');
-  console.log(after);
-
-  // Check sample
-  const { data: s } = await supa.from('apollo_samples').select('*').eq('company_id', coId).order('id', { ascending: false }).limit(1);
-  console.log('\nSample:');
-  console.log(s?.[0]);
-
-  // Check company state
-  const { data: co2 } = await supa.from('companies').select('*').eq('id', coId).single();
-  console.log('\nCompany state:');
-  console.log(co2);
+  // Recent uploads
+  const { data: ups } = await supa.from('uploads').select('id, filename, row_count_raw, row_count_admitted, status, uploaded_at').order('uploaded_at', { ascending: false }).limit(5);
+  console.log(`\nRecent uploads:`);
+  for (const u of ups ?? []) {
+    const ua = u as any;
+    console.log(`  ${ua.uploaded_at} ${ua.filename} raw=${ua.row_count_raw} admitted=${ua.row_count_admitted} status=${ua.status}`);
+  }
 })();
