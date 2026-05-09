@@ -55,7 +55,7 @@ export async function processEnrichmentJob(supa: SupabaseClient, companyId: stri
       await supa.from('contacts').delete().eq('id', c.id);
       continue;
     }
-    if (m.email_status !== 'verified') {
+    if (m.email_status !== 'verified' && m.email_status !== 'guessed') {
       await supa.from('apollo_samples').insert({
         company_id: companyId,
         person_first_name: c.first_name, person_last_name: c.last_name,
