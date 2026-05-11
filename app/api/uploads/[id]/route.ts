@@ -61,15 +61,15 @@ async function getNotFoundCompaniesForUpload(
   supa: ReturnType<typeof supabaseService>,
   upload: { id: string; uploaded_at: string },
 ): Promise<string[]> {
-  // 1. apollo_samples with reason='not_found' written after this upload's start.
-  //    A sloppy time-window join, but apollo_samples doesn't carry upload_id and
-  //    a schema change is out of scope. Anything created BEFORE the upload can't
-  //    have come from it; anything after is a candidate.
+  // 1. apollo_samples with reason='no_email_found' written after this upload's
+  //    start. A sloppy time-window join, but apollo_samples doesn't carry
+  //    upload_id and a schema change is out of scope. Anything created BEFORE
+  //    the upload can't have come from it; anything after is a candidate.
   const { data: nfSamples } = await supa
     .from('apollo_samples')
     .select('company_id')
-    .eq('email_ignored_reason', 'not_found')
-    .gte('created_at', upload.uploaded_at);
+    .eq('email_ignored_reason', 'no_email_found')
+    .gte('sampled_at', upload.uploaded_at);
   if (!nfSamples || nfSamples.length === 0) return [];
   const candidateCompanyIds = Array.from(new Set(nfSamples.map((s: { company_id: string }) => s.company_id)));
 

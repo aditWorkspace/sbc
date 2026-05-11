@@ -160,7 +160,7 @@ describe('processEnrichmentJob — tristate handling', () => {
       person_first_name: 'A',
       person_last_name: 'A',
       email_returned: null,
-      email_ignored_reason: 'not_found',
+      email_ignored_reason: 'no_email_found',
     });
   });
 

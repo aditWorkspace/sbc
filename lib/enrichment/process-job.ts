@@ -51,18 +51,23 @@ export async function processEnrichmentJob(supa: SupabaseClient, companyId: stri
       continue;
     }
     if (m === null || !m.email) {
-      // Definite no-match. Record an apollo_samples row with reason='not_found'
-      // BEFORE the delete so (a) Stage D dedupe skips this exact name on the next
-      // upload (no point re-burning a credit Icypeas already proved is fruitless),
-      // and (b) the consultant can see WHY 252 contacts vanished. Without this
-      // audit row, NOT_FOUND silently dropped every typo'd company name with
-      // zero diagnostic — which is exactly what triggered this fix.
-      await supa.from('apollo_samples').insert({
+      // Definite no-match. Record an apollo_samples row with reason
+      // 'no_email_found' BEFORE the delete so (a) Stage D dedupe skips this exact
+      // name on the next upload (no point re-burning a credit Icypeas already
+      // proved is fruitless), and (b) the consultant can see WHY 252 contacts
+      // vanished. Without this audit row, NOT_FOUND silently dropped every
+      // typo'd company name with zero diagnostic — which is exactly what
+      // triggered this fix. (The reason name has to be one of the values in
+      // the apollo_samples.email_ignored_reason CHECK constraint — 'no_email_found'
+      // was already enrolled but unused; we adopt it instead of bumping the
+      // constraint.)
+      const { error: sErr } = await supa.from('apollo_samples').insert({
         company_id: companyId,
         person_first_name: c.first_name, person_last_name: c.last_name,
-        email_returned: null, email_ignored_reason: 'not_found',
+        email_returned: null, email_ignored_reason: 'no_email_found',
         credits_spent: 1,
       });
+      if (sErr) throw sErr;
       await supa.from('contacts').delete().eq('id', c.id);
       continue;
     }
