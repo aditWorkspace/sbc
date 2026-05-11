@@ -45,6 +45,7 @@ export function UploadZone() {
   const [pending, setPending] = useState<number>(0);
   const [error, setError] = useState<string>('');
   const [pollTimedOut, setPollTimedOut] = useState<boolean>(false);
+  const [notFoundCompanies, setNotFoundCompanies] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Poll upload status while pending > 0
@@ -57,6 +58,7 @@ export function UploadZone() {
       const body = await res.json();
       setEnriched(body.enriched ?? 0);
       setPending(body.pending ?? 0);
+      setNotFoundCompanies(Array.isArray(body.not_found_companies) ? body.not_found_companies : []);
       if ((body.pending ?? 0) === 0) {
         setStage('done');
         return;
@@ -73,7 +75,7 @@ export function UploadZone() {
   }, [stage, summary]);
 
   async function handleFile(file: File) {
-    setError(''); setSummary(null); setEnriched(0); setPending(0); setPollTimedOut(false);
+    setError(''); setSummary(null); setEnriched(0); setPending(0); setPollTimedOut(false); setNotFoundCompanies([]);
 
     setStage('reading');
     setMsg('Reading file...');
@@ -180,6 +182,15 @@ export function UploadZone() {
                 <p className="text-xs text-amber-400">
                   Still processing in the background. Refresh this page or check the History tab in a few minutes to see final results.
                 </p>
+              )}
+              {stage === 'done' && notFoundCompanies.length > 0 && (
+                <Alert className="border-amber-500/40 bg-amber-500/5 mt-2">
+                  <AlertDescription className="text-xs text-amber-300">
+                    Icypeas couldn&apos;t find anyone at:{' '}
+                    <span className="font-medium">{notFoundCompanies.join(', ')}</span>.
+                    Possible typo in the company column — double-check the spelling and re-upload.
+                  </AlertDescription>
+                </Alert>
               )}
             </div>
           )}

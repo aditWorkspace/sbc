@@ -161,7 +161,7 @@ export async function ingestUpload(
     await supa.from('enrichment_jobs').insert({ company_id: cid }).then(() => {}, () => {});
   }
 
-  await supa.from('uploads').update({
+  const { error: upErr2 } = await supa.from('uploads').update({
     row_count_deduped: deduped,
     row_count_archived: archivedCount,
     row_count_already_in_pool: alreadyInPool,
@@ -171,6 +171,11 @@ export async function ingestUpload(
     status: 'complete',
     completed_at: new Date().toISOString(),
   }).eq('id', uploadId);
+  // The previous fire-and-forget pattern silently swallowed PGRST204 from the
+  // missing row_count_previously_attempted column for weeks (April → May 2026).
+  // Throw so future schema drift surfaces immediately instead of via stuck
+  // 'processing' rows that look fine to the consultant.
+  if (upErr2) throw upErr2;
 
   return {
     uploadId,

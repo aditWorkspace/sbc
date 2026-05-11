@@ -138,7 +138,7 @@ describe('processEnrichmentJob — tristate handling', () => {
     expect(contactWrites).toHaveLength(0);
   });
 
-  it('null match deletes contact (definite no-match policy)', async () => {
+  it('null match deletes contact AND records a not_found apollo_samples row', async () => {
     const { supa, ops } = makeSupa({
       company: baseCompany,
       contacts: [mkContact('c1', 'A', 'A')],
@@ -150,6 +150,18 @@ describe('processEnrichmentJob — tristate handling', () => {
     const deletes = ops.filter(o => o.table === 'contacts' && o.op === 'delete');
     expect(deletes).toHaveLength(1);
     expect(deletes[0]?.ids).toEqual(['c1']);
+    // The audit row is the whole point of the fix — without it, NOT_FOUND deletes
+    // are invisible and the consultant has no way to tell that 252 contacts
+    // disappeared because Icypeas couldn't find them.
+    const sampleInserts = ops.filter(o => o.table === 'apollo_samples' && o.op === 'insert');
+    expect(sampleInserts).toHaveLength(1);
+    expect(sampleInserts[0]?.payload).toMatchObject({
+      company_id: 'co1',
+      person_first_name: 'A',
+      person_last_name: 'A',
+      email_returned: null,
+      email_ignored_reason: 'not_found',
+    });
   });
 
   it('mixed batch: undefined kept, null deleted, found enriched', async () => {

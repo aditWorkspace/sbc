@@ -1,7 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { icypeasBulkMatch, IcypeasCreditsExhausted, IcypeasRateLimit } from '@/lib/icypeas/client';
 import { detectPattern, isPersonalDomain, renderTemplate, type Pattern } from '@/lib/apollo/patterns';
-import { normalize } from '@/lib/csv/normalize';
 import { tallySamples, evaluateConfidence } from '@/lib/enrichment/tally';
 
 const BATCH = 5;
@@ -52,6 +51,18 @@ export async function processEnrichmentJob(supa: SupabaseClient, companyId: stri
       continue;
     }
     if (m === null || !m.email) {
+      // Definite no-match. Record an apollo_samples row with reason='not_found'
+      // BEFORE the delete so (a) Stage D dedupe skips this exact name on the next
+      // upload (no point re-burning a credit Icypeas already proved is fruitless),
+      // and (b) the consultant can see WHY 252 contacts vanished. Without this
+      // audit row, NOT_FOUND silently dropped every typo'd company name with
+      // zero diagnostic — which is exactly what triggered this fix.
+      await supa.from('apollo_samples').insert({
+        company_id: companyId,
+        person_first_name: c.first_name, person_last_name: c.last_name,
+        email_returned: null, email_ignored_reason: 'not_found',
+        credits_spent: 1,
+      });
       await supa.from('contacts').delete().eq('id', c.id);
       continue;
     }
@@ -78,17 +89,13 @@ export async function processEnrichmentJob(supa: SupabaseClient, companyId: stri
       await supa.from('contacts').delete().eq('id', c.id);
       continue;
     }
-    const returnedOrgNorm = normalize(m.organization?.name ?? '');
-    if (returnedOrgNorm && returnedOrgNorm !== company.name_normalized) {
-      await supa.from('apollo_samples').insert({
-        company_id: companyId,
-        person_first_name: c.first_name, person_last_name: c.last_name,
-        email_returned: m.email, email_ignored_reason: 'wrong_company',
-        credits_spent: 1,
-      });
-      await supa.from('contacts').delete().eq('id', c.id);
-      continue;
-    }
+    // The old wrong_company guard (compare normalize(m.organization?.name) to
+    // company.name_normalized) lived here. It was dead code: the Icypeas response
+    // never includes a company name (verified empirically against the live API
+    // 2026-05-10), so m.organization?.name was always undefined and the check
+    // never fired. Pattern detection below already cross-validates the email's
+    // local part against the contact's first/last name, which is a stronger
+    // sanity check than a string-equal on a name we never receive.
     const det = detectPattern(c.first_name, c.last_name, m.email);
     await supa.from('apollo_samples').insert({
       company_id: companyId,

@@ -108,10 +108,16 @@ function personFromItem(item: IcypeasResultItem | null): BulkMatchPerson | null 
   const r = item.results;
   const primary = r?.emails?.[0];
   if (!primary?.email) return null;
+  // The real Icypeas response (verified empirically 2026-05-10) does not carry
+  // a company_name OR domain inside `results` — only firstname/lastname/emails/
+  // phones/saasServices. The previous `r?.company_name ?? r?.domain` was a typo
+  // bait: when a hypothetical domain ever did sneak in, it ended up being treated
+  // as a company name by downstream callers and the contact got dropped. We just
+  // leave organization undefined.
   return {
     email: primary.email,
     email_status: certaintyToStatus(primary.certainty),
-    organization: { name: r?.company_name ?? r?.domain },
+    organization: { name: r?.company_name },
     first_name: r?.firstname,
     last_name: r?.lastname,
   };
